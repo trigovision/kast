@@ -74,7 +74,7 @@ where
     }
 }
 
-pub struct Processor<T = ()> {
+pub struct Processor {
     pub config: ClientConfig,
     pub inputs: HashMap<String, Box<dyn GenericInput>>,
     pub stream_consumer: Arc<StreamConsumer>,
