@@ -9,26 +9,50 @@ use rdkafka::{
 };
 use serde::de::DeserializeOwned;
 
-pub struct Context {}
+//TODO: Should context be a trait?
+pub struct Context<T> {
+    origingal_state: Option<T>,
+    new_state: Option<T>,
+}
 
-pub trait GenericInput: InputClone + Sync + Send {
+impl<T> Context<T>
+where
+    T: Clone,
+{
+    fn new(state: Option<T>) -> Self {
+        Self {
+            origingal_state: state,
+            new_state: None,
+        }
+    }
+
+    pub fn get_state(&self) -> Option<T> {
+        self.origingal_state.clone()
+    }
+
+    pub fn set_state(&mut self, state: Option<T>) {
+        self.new_state = state
+    }
+}
+
+pub trait GenericInput<S>: InputClone<S> + Sync + Send {
     fn topic(&self) -> String;
-    fn handle(&self, data: Option<&[u8]>);
+    fn handle(&self, ctx: &mut Context<S>, data: Option<&[u8]>);
 }
 
 #[derive(Clone)]
-pub struct Input<T, F>
+pub struct Input<T, S, F>
 where
-    F: Copy + FnOnce(Context, &T) -> (),
+    F: Copy + FnOnce(&mut Context<S>, &T) -> (),
 {
     topic: String,
     callback: F,
-    _marker: PhantomData<T>,
+    _marker: PhantomData<(T, S)>,
 }
 
-impl<T, F> Input<T, F>
+impl<T, S, F> Input<T, S, F>
 where
-    F: Copy + FnOnce(Context, &T) -> (),
+    F: Copy + FnOnce(&mut Context<S>, &T) -> (),
 {
     pub fn new(topic: String, callback: F) -> Self {
         Input {
@@ -39,53 +63,57 @@ where
     }
 }
 
-impl Clone for Box<dyn GenericInput> {
-    fn clone(&self) -> Box<dyn GenericInput> {
+impl<S> Clone for Box<dyn GenericInput<S>> {
+    fn clone(&self) -> Box<dyn GenericInput<S>> {
         self.clone_box()
     }
 }
 
-pub trait InputClone {
-    fn clone_box(&self) -> Box<dyn GenericInput>;
+pub trait InputClone<S> {
+    fn clone_box(&self) -> Box<dyn GenericInput<S>>;
 }
 
-impl<T> InputClone for T
+impl<T, S> InputClone<S> for T
 where
-    T: 'static + GenericInput + Clone,
+    T: 'static + GenericInput<S> + Clone,
 {
-    fn clone_box(&self) -> Box<dyn GenericInput> {
+    fn clone_box(&self) -> Box<dyn GenericInput<S>> {
         Box::new(self.clone())
     }
 }
 
-impl<T, F> GenericInput for Input<T, F>
+impl<T, S, F> GenericInput<S> for Input<T, S, F>
 where
-    F: Copy + FnOnce(Context, &T) -> () + Sync + Clone + 'static + Send,
+    F: Copy + FnOnce(&mut Context<S>, &T) -> () + Sync + Clone + 'static + Send,
     T: Sync + Send + Clone + DeserializeOwned + 'static,
+    S: Clone + Send + Sync + 'static,
 {
     fn topic(&self) -> String {
         self.topic.clone()
     }
 
-    fn handle(&self, data: Option<&[u8]>) {
-        let ctx = Context {};
+    fn handle(&self, ctx: &mut Context<S>, data: Option<&[u8]>) {
         let msg: T = serde_json::from_slice(data.expect("empty message")).unwrap();
         (self.callback)(ctx, &msg);
     }
 }
 
-pub struct Processor {
+pub struct Processor<S> {
     pub config: ClientConfig,
-    pub inputs: HashMap<String, Box<dyn GenericInput>>,
+    pub inputs: HashMap<String, Box<dyn GenericInput<S>>>,
     pub stream_consumer: Arc<StreamConsumer>,
+    _marker: PhantomData<S>,
 }
 
-impl Processor {
-    pub fn new(config: ClientConfig, inputs: Vec<Box<dyn GenericInput>>) -> Self {
+impl<S> Processor<S>
+where
+    S: Clone + Send + 'static,
+{
+    pub fn new(config: ClientConfig, inputs: Vec<Box<dyn GenericInput<S>>>) -> Self {
         let stream_consumer: StreamConsumer = config.create().unwrap();
         let stream_consumer = Arc::new(stream_consumer);
 
-        let inputs: HashMap<String, Box<dyn GenericInput>> = inputs
+        let inputs: HashMap<String, Box<dyn GenericInput<S>>> = inputs
             .into_iter()
             .map(|input| (input.topic(), input))
             .collect();
@@ -94,6 +122,7 @@ impl Processor {
             config,
             inputs,
             stream_consumer,
+            _marker: PhantomData,
         }
     }
 
@@ -130,9 +159,9 @@ impl Processor {
         let stream_consumer = self.stream_consumer.clone();
 
         for partition in 0..num_partitions {
-            let bla: Vec<(
+            let partitioned_topics: Vec<(
                 StreamPartitionQueue<DefaultConsumerContext>,
-                Box<dyn GenericInput>,
+                Box<dyn GenericInput<S>>,
             )> = self
                 .inputs
                 .iter()
@@ -147,20 +176,32 @@ impl Processor {
                 .collect();
 
             tokio::spawn(async move {
-                let mut select_all = SelectAll::new();
-                let streams = bla.iter().map(|(a, h)| a.stream().map(move |msg| (h, msg)));
-                for stream in streams {
-                    select_all.push(stream)
-                }
+                let mut map: HashMap<String, S> = HashMap::new();
+
+                let mut select_all = SelectAll::from_iter(
+                    partitioned_topics
+                        .iter()
+                        .map(|(a, h)| a.stream().map(move |msg| (h, msg))),
+                );
 
                 while let Some((h, msg)) = select_all.next().await {
                     let msg = msg.unwrap();
+
+                    //TODO: Key serializer?
+                    let key = std::str::from_utf8(msg.key().unwrap()).unwrap();
+
                     println!(
                         "Received message from partition {:?}, topic {}",
                         partition,
                         msg.topic(),
                     );
-                    h.handle(msg.payload())
+
+                    let state = map.get(key).map(|s| s.clone());
+                    let mut ctx = Context::<S>::new(state);
+                    h.handle(&mut ctx, msg.payload());
+                    if let Some(state) = ctx.new_state {
+                        map.insert(key.to_string(), state);
+                    }
                 }
             });
         }
@@ -178,7 +219,6 @@ impl Processor {
         let stream_consumer = self.stream_consumer.clone();
 
         let task = tokio::spawn(async move {
-            // stream_consumer.recv()
             let message = stream_consumer.recv().await;
             panic!(
                 "main stream consumer queue unexpectedly received message: {:?}",

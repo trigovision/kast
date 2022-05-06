@@ -6,16 +6,39 @@ use serde::Deserialize;
 struct Click {}
 
 #[derive(Debug, Clone, Deserialize)]
+struct Click2 {
+    clicks: u32,
+}
+
+#[derive(Debug, Clone, Deserialize)]
 struct ClicksPerUser {
     clicks: u32,
 }
 
-fn print_message(_ctx: Context, click: &Click) {
-    println!("Hi {:?}", click)
+fn print_message(ctx: &mut Context<ClicksPerUser>, _click: &Click) {
+    let clicks_per_user = match ctx.get_state() {
+        Some(mut state) => {
+            state.clicks += 1;
+            state
+        }
+        None => ClicksPerUser { clicks: 0 },
+    };
+    println!("Hi {:?}", clicks_per_user);
+    ctx.set_state(Some(clicks_per_user))
 }
 
-fn print_message2(_ctx: Context, click: &Click) {
-    println!("Hi2 {:?}", click)
+fn print_message2(ctx: &mut Context<ClicksPerUser>, click: &Click2) {
+    let clicks_per_user = match ctx.get_state() {
+        Some(mut state) => {
+            state.clicks += click.clicks;
+            state
+        }
+        None => ClicksPerUser {
+            clicks: click.clicks,
+        },
+    };
+    println!("Hi2 {:?}", clicks_per_user);
+    ctx.set_state(Some(clicks_per_user))
 }
 
 #[tokio::main]
