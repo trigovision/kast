@@ -26,16 +26,9 @@ fn print_message(ctx: &mut Context<ClicksPerUser>, _click: &Click) {
 }
 
 fn print_message2(ctx: &mut Context<ClicksPerUser>, click: &Click2) {
-    let mut clicks_per_user = match ctx.get_state() {
-        Some(state) => state,
-        None => ClicksPerUser { clicks: 0 },
-    };
     for _ in 0..click.clicks {
         ctx.emit("c1", "b", &Click {})
     }
-    clicks_per_user.clicks += click.clicks as u32;
-    println!("Hi2 {:?}", clicks_per_user);
-    ctx.set_state(Some(clicks_per_user))
 }
 
 //TODO: Support outputs
