@@ -1,28 +1,75 @@
 use std::{collections::HashMap, marker::PhantomData, sync::Arc, time::Duration};
 
-use futures::{stream::SelectAll, StreamExt};
+use futures::{future::join_all, stream::SelectAll, StreamExt};
 use rdkafka::{
     consumer::{
         stream_consumer::StreamPartitionQueue, Consumer, DefaultConsumerContext, StreamConsumer,
     },
+    producer::{DeliveryFuture, FutureProducer, FutureRecord},
     ClientConfig, Message,
 };
-use serde::de::DeserializeOwned;
+use serde::{de::DeserializeOwned, Serialize};
 
-//TODO: Should context be a trait?
-pub struct Context<T> {
-    origingal_state: Option<T>,
-    new_state: Option<T>,
+#[async_trait::async_trait]
+pub trait StateStore<K, V>
+where
+    K: Eq + std::hash::Hash,
+{
+    async fn get<Q: ?Sized + Sync>(&self, k: &Q) -> Option<&V>
+    where
+        K: std::borrow::Borrow<Q>,
+        Q: Eq + std::hash::Hash;
+    async fn set(&mut self, k: K, v: V) -> Option<V>;
 }
 
-impl<T> Context<T>
+pub struct InMemoryStateStore<K, V> {
+    cache: HashMap<K, V>,
+}
+
+impl<K, V> InMemoryStateStore<K, V> {
+    pub fn new() -> Self {
+        Self {
+            cache: HashMap::new(),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl<K, V> StateStore<K, V> for InMemoryStateStore<K, V>
+where
+    K: Eq + std::hash::Hash + Sync + Send,
+    V: Send + Sync,
+{
+    async fn get<Q: ?Sized + Sync>(&self, k: &Q) -> Option<&V>
+    where
+        K: std::borrow::Borrow<Q>,
+        Q: Eq + std::hash::Hash,
+    {
+        self.cache.get(k)
+    }
+    async fn set(&mut self, k: K, v: V) -> Option<V> {
+        self.cache.insert(k, v)
+    }
+}
+
+//TODO: Should context be a trait?
+pub struct Context<'a, T> {
+    origingal_state: Option<T>,
+    new_state: Option<T>,
+    producer: &'a FutureProducer,
+    sends: Vec<DeliveryFuture>,
+}
+
+impl<'a, T> Context<'a, T>
 where
     T: Clone,
 {
-    fn new(state: Option<T>) -> Self {
+    fn new(state: Option<T>, producer: &'a FutureProducer) -> Self {
         Self {
             origingal_state: state,
             new_state: None,
+            producer,
+            sends: vec![],
         }
     }
 
@@ -32,6 +79,12 @@ where
 
     pub fn set_state(&mut self, state: Option<T>) {
         self.new_state = state
+    }
+
+    pub fn emit<M: Serialize>(&mut self, topic: &str, key: &str, msg: &M) {
+        let data = serde_json::to_vec(msg).unwrap();
+        let record = FutureRecord::to(topic).key(key).payload(&data);
+        self.sends.push(self.producer.send_result(record).unwrap())
     }
 }
 
@@ -98,22 +151,29 @@ where
     }
 }
 
-pub struct Processor<S> {
+pub struct Processor<TState, TStore, F> {
     pub config: ClientConfig,
-    pub inputs: HashMap<String, Box<dyn GenericInput<S>>>,
+    pub inputs: HashMap<String, Box<dyn GenericInput<TState>>>,
     pub stream_consumer: Arc<StreamConsumer>,
-    _marker: PhantomData<S>,
+    state_store_gen: F,
+    _marker: PhantomData<(TState, TStore)>,
 }
 
-impl<S> Processor<S>
+impl<TState, TStore, F> Processor<TState, TStore, F>
 where
-    S: Clone + Send + 'static,
+    TState: Clone + Send + 'static,
+    TStore: StateStore<String, TState> + Send + Sync,
+    F: FnOnce() -> TStore + Copy + Send + 'static,
 {
-    pub fn new(config: ClientConfig, inputs: Vec<Box<dyn GenericInput<S>>>) -> Self {
+    pub fn new(
+        config: ClientConfig,
+        inputs: Vec<Box<dyn GenericInput<TState>>>,
+        state_store_gen: F,
+    ) -> Self {
         let stream_consumer: StreamConsumer = config.create().unwrap();
         let stream_consumer = Arc::new(stream_consumer);
 
-        let inputs: HashMap<String, Box<dyn GenericInput<S>>> = inputs
+        let inputs: HashMap<String, Box<dyn GenericInput<TState>>> = inputs
             .into_iter()
             .map(|input| (input.topic(), input))
             .collect();
@@ -122,6 +182,7 @@ where
             config,
             inputs,
             stream_consumer,
+            state_store_gen,
             _marker: PhantomData,
         }
     }
@@ -161,7 +222,7 @@ where
         for partition in 0..num_partitions {
             let partitioned_topics: Vec<(
                 StreamPartitionQueue<DefaultConsumerContext>,
-                Box<dyn GenericInput<S>>,
+                Box<dyn GenericInput<TState>>,
             )> = self
                 .inputs
                 .iter()
@@ -175,9 +236,13 @@ where
                 })
                 .collect();
 
-            tokio::spawn(async move {
-                let mut map: HashMap<String, S> = HashMap::new();
+            let gen = self.state_store_gen.clone();
+            let stream_consumer = self.stream_consumer.clone();
+            let producer: FutureProducer = self.config.create().unwrap();
 
+            tokio::spawn(async move {
+                let mut state_store = gen();
+                // let producer = stream_consumer
                 let mut select_all = SelectAll::from_iter(
                     partitioned_topics
                         .iter()
@@ -196,12 +261,24 @@ where
                         msg.topic(),
                     );
 
-                    let state = map.get(key).map(|s| s.clone());
-                    let mut ctx = Context::<S>::new(state);
+                    let state = state_store.get(key).await.map(|s| s.clone());
+                    let mut ctx = Context::<TState>::new(state, &producer);
                     h.handle(&mut ctx, msg.payload());
                     if let Some(state) = ctx.new_state {
-                        map.insert(key.to_string(), state);
+                        state_store.set(key.to_string(), state).await;
                     }
+
+                    let stream_consumer = stream_consumer.clone();
+                    let msg_topic = msg.topic().to_string();
+                    let msg_partition = msg.partition();
+                    let msg_offset = msg.offset();
+
+                    tokio::spawn(async move {
+                        join_all(ctx.sends).await;
+                        stream_consumer
+                            .store_offset(&msg_topic, msg_partition, msg_offset)
+                            .unwrap();
+                    });
                 }
             });
         }
