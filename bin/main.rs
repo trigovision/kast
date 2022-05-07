@@ -31,7 +31,7 @@ fn print_message(ctx: &mut Context<ClicksPerUser>, _click: &Click) {
 
 fn print_message2(ctx: &mut Context<ClicksPerUser>, click: &Click2) {
     for _ in 0..click.clicks {
-        ctx.emit("c1", "a", &Click {})
+        ctx.emit("c1", ctx.key(), &Click {})
     }
 }
 

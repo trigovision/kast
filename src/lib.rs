@@ -17,6 +17,7 @@ use state_store::StateStore;
 
 //TODO: Should context be a trait?
 pub struct Context<'a, T> {
+    key: &'a str,
     origingal_state: Option<T>,
     new_state: Option<T>,
     producer: &'a FutureProducer,
@@ -27,13 +28,18 @@ impl<'a, T> Context<'a, T>
 where
     T: Clone,
 {
-    fn new(state: Option<T>, producer: &'a FutureProducer) -> Self {
+    fn new(key: &'a str, state: Option<T>, producer: &'a FutureProducer) -> Self {
         Self {
+            key,
             origingal_state: state,
             new_state: None,
             producer,
             sends: vec![],
         }
+    }
+
+    pub fn key(&self) -> &'a str {
+        self.key
     }
 
     pub fn get_state(&self) -> Option<T> {
@@ -232,7 +238,7 @@ where
                     );
 
                     let state = state_store.get(key).await.map(|s| s.clone());
-                    let mut ctx = Context::<TState>::new(state, &producer);
+                    let mut ctx = Context::<TState>::new(key, state, &producer);
                     h.handle(&mut ctx, msg.payload());
                     if let Some(state) = ctx.new_state {
                         state_store.set(key.to_string(), state).await;
