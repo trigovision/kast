@@ -1,5 +1,9 @@
+pub mod encoders;
+pub mod state_store;
+
 use std::{collections::HashMap, marker::PhantomData, sync::Arc, time::Duration};
 
+use encoders::Encoder;
 use futures::{future::join_all, stream::SelectAll, StreamExt};
 use rdkafka::{
     consumer::{
@@ -9,48 +13,7 @@ use rdkafka::{
     ClientConfig, Message,
 };
 use serde::{de::DeserializeOwned, Serialize};
-
-#[async_trait::async_trait]
-pub trait StateStore<K, V>
-where
-    K: Eq + std::hash::Hash,
-{
-    async fn get<Q: ?Sized + Sync>(&self, k: &Q) -> Option<&V>
-    where
-        K: std::borrow::Borrow<Q>,
-        Q: Eq + std::hash::Hash;
-    async fn set(&mut self, k: K, v: V) -> Option<V>;
-}
-
-pub struct InMemoryStateStore<K, V> {
-    cache: HashMap<K, V>,
-}
-
-impl<K, V> InMemoryStateStore<K, V> {
-    pub fn new() -> Self {
-        Self {
-            cache: HashMap::new(),
-        }
-    }
-}
-
-#[async_trait::async_trait]
-impl<K, V> StateStore<K, V> for InMemoryStateStore<K, V>
-where
-    K: Eq + std::hash::Hash + Sync + Send,
-    V: Send + Sync,
-{
-    async fn get<Q: ?Sized + Sync>(&self, k: &Q) -> Option<&V>
-    where
-        K: std::borrow::Borrow<Q>,
-        Q: Eq + std::hash::Hash,
-    {
-        self.cache.get(k)
-    }
-    async fn set(&mut self, k: K, v: V) -> Option<V> {
-        self.cache.insert(k, v)
-    }
-}
+use state_store::StateStore;
 
 //TODO: Should context be a trait?
 pub struct Context<'a, T> {
@@ -94,23 +57,27 @@ pub trait GenericInput<S>: InputClone<S> + Sync + Send {
 }
 
 #[derive(Clone)]
-pub struct Input<T, S, F>
+pub struct Input<T, S, F, E>
 where
     F: Copy + FnOnce(&mut Context<S>, &T) -> (),
+    E: Encoder<In = T>,
 {
     topic: String,
     callback: F,
-    _marker: PhantomData<(T, S)>,
+    encoder: E,
+    _marker: PhantomData<S>,
 }
 
-impl<T, S, F> Input<T, S, F>
+impl<T, S, F, E> Input<T, S, F, E>
 where
     F: Copy + FnOnce(&mut Context<S>, &T) -> (),
+    E: Encoder<In = T>,
 {
-    pub fn new(topic: String, callback: F) -> Self {
+    pub fn new(topic: String, encoder: E, callback: F) -> Self {
         Input {
             topic,
             callback,
+            encoder,
             _marker: PhantomData,
         }
     }
@@ -135,9 +102,10 @@ where
     }
 }
 
-impl<T, S, F> GenericInput<S> for Input<T, S, F>
+impl<T, S, F, E> GenericInput<S> for Input<T, S, F, E>
 where
     F: Copy + FnOnce(&mut Context<S>, &T) -> () + Sync + Clone + 'static + Send,
+    E: Encoder<In = T> + Sync + Clone + 'static + Send,
     T: Sync + Send + Clone + DeserializeOwned + 'static,
     S: Clone + Send + Sync + 'static,
 {
@@ -146,7 +114,8 @@ where
     }
 
     fn handle(&self, ctx: &mut Context<S>, data: Option<&[u8]>) {
-        let msg: T = serde_json::from_slice(data.expect("empty message")).unwrap();
+        let msg = self.encoder.encode(data);
+        // let msg: T = serde_json::from_slice(data.expect("empty message")).unwrap();
         (self.callback)(ctx, &msg);
     }
 }
@@ -256,9 +225,10 @@ where
                     let key = std::str::from_utf8(msg.key().unwrap()).unwrap();
 
                     println!(
-                        "Received message from partition {:?}, topic {}",
+                        "Received message from partition {:?}, topic {}, key {:?}",
                         partition,
                         msg.topic(),
+                        msg.key(),
                     );
 
                     let state = state_store.get(key).await.map(|s| s.clone());

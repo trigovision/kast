@@ -1,6 +1,6 @@
-use kast::{Context, InMemoryStateStore, Input, Processor};
+use kast::{encoders::JsonEncoder, state_store::InMemoryStateStore, Context, Input, Processor};
 use rdkafka::ClientConfig;
-use serde::{Deserialize, Serialize};
+use serde::{de::DeserializeOwned, Deserialize, Serialize};
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 struct Click {}
@@ -15,6 +15,10 @@ struct ClicksPerUser {
     clicks: u32,
 }
 
+fn json_encoder<T: DeserializeOwned>(data: Option<&[u8]>) -> T {
+    serde_json::from_slice(data.expect("empty message")).unwrap()
+}
+
 fn print_message(ctx: &mut Context<ClicksPerUser>, _click: &Click) {
     let mut clicks_per_user = match ctx.get_state() {
         Some(state) => state,
@@ -27,7 +31,7 @@ fn print_message(ctx: &mut Context<ClicksPerUser>, _click: &Click) {
 
 fn print_message2(ctx: &mut Context<ClicksPerUser>, click: &Click2) {
     for _ in 0..click.clicks {
-        ctx.emit("c1", "b", &Click {})
+        ctx.emit("c1", "a", &Click {})
     }
 }
 
@@ -37,7 +41,7 @@ fn print_message2(ctx: &mut Context<ClicksPerUser>, click: &Click2) {
 async fn main() {
     let settings = ClientConfig::new()
         .set("bootstrap.servers", "localhost:9092")
-        .set("group.id", "keypoints2")
+        .set("group.id", "keypoints")
         .set("heartbeat.interval.ms", "250")
         .set("enable.auto.commit", "true")
         // This is important so offset won't be store automatically
@@ -53,8 +57,12 @@ async fn main() {
     let p = Processor::new(
         settings,
         vec![
-            Box::new(Input::new("c1".to_string(), print_message)),
-            Box::new(Input::new("c2".to_string(), print_message2)),
+            Box::new(Input::new("c1".to_string(), json_encoder, print_message)),
+            Box::new(Input::new(
+                "c2".to_string(),
+                JsonEncoder::new(),
+                print_message2,
+            )),
         ],
         InMemoryStateStore::new,
     );
