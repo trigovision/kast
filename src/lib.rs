@@ -15,10 +15,9 @@ use rdkafka::{
 use serde::{de::DeserializeOwned, Serialize};
 use state_store::StateStore;
 
-//TODO: Should context be a trait?
 pub struct Context<'a, T> {
     key: &'a str,
-    origingal_state: Option<T>,
+    origingal_state: Option<T>, //TODO: Should I change this also to ref?
     new_state: Option<T>,
     producer: &'a FutureProducer,
     sends: Vec<DeliveryFuture>,

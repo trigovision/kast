@@ -19,7 +19,7 @@ fn json_encoder<T: DeserializeOwned>(data: Option<&[u8]>) -> T {
     serde_json::from_slice(data.expect("empty message")).unwrap()
 }
 
-fn print_message(ctx: &mut Context<ClicksPerUser>, _click: &Click) {
+fn handle_clicks_stateful(ctx: &mut Context<ClicksPerUser>, _click: &Click) {
     let mut clicks_per_user = match ctx.get_state() {
         Some(state) => state,
         None => ClicksPerUser { clicks: 0 },
@@ -29,7 +29,7 @@ fn print_message(ctx: &mut Context<ClicksPerUser>, _click: &Click) {
     ctx.set_state(Some(clicks_per_user))
 }
 
-fn print_message2(ctx: &mut Context<ClicksPerUser>, click: &Click2) {
+fn emit_clicks_stateless(ctx: &mut Context<ClicksPerUser>, click: &Click2) {
     for _ in 0..click.clicks {
         ctx.emit("c1", ctx.key(), &Click {})
     }
@@ -57,11 +57,15 @@ async fn main() {
     let p = Processor::new(
         settings,
         vec![
-            Box::new(Input::new("c1".to_string(), json_encoder, print_message)),
+            Box::new(Input::new(
+                "c1".to_string(),
+                json_encoder,
+                handle_clicks_stateful,
+            )),
             Box::new(Input::new(
                 "c2".to_string(),
                 JsonEncoder::new(),
-                print_message2,
+                emit_clicks_stateless,
             )),
         ],
         InMemoryStateStore::new,
