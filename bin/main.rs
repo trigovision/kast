@@ -58,16 +58,8 @@ async fn main() {
     let p = Processor::new(
         settings,
         vec![
-            Box::new(Input::new(
-                "c1".to_string(),
-                json_encoder,
-                handle_clicks_stateful,
-            )),
-            Box::new(Input::new(
-                "c2".to_string(),
-                JsonEncoder::new(),
-                emit_clicks_stateless,
-            )),
+            Input::new("c1".to_string(), json_encoder, handle_clicks_stateful),
+            Input::new("c2".to_string(), JsonEncoder::new(), emit_clicks_stateless),
         ],
         InMemoryStateStore::new,
     );

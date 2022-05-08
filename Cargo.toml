@@ -30,7 +30,7 @@ pin-project = "*"
 sled = "0.34.7"
 rocksdb = "0.18.0"
 bigtable_rs = "0.1.5"
-
+dyn-clone = "1.0.5"
 chrono = "0.4.19"
 async-trait = "0.1.53"
 google-bigtableadmin2 = "3.0.0"

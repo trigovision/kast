@@ -3,6 +3,7 @@ pub mod state_store;
 
 use std::{collections::HashMap, marker::PhantomData, sync::Arc, time::Duration};
 
+use dyn_clone::DynClone;
 use encoders::Encoder;
 use futures::{future::join_all, stream::SelectAll, StreamExt};
 use rdkafka::{
@@ -56,10 +57,11 @@ where
     }
 }
 
-pub trait GenericInput<S>: InputClone<S> + Sync + Send {
+pub trait GenericInput<S>: DynClone + Sync + Send {
     fn topic(&self) -> String;
     fn handle(&self, ctx: &mut Context<S>, data: Option<&[u8]>);
 }
+dyn_clone::clone_trait_object!(<S> GenericInput<S>);
 
 #[derive(Clone)]
 pub struct Input<T, S, F, E>
@@ -78,32 +80,13 @@ where
     F: Copy + FnOnce(&mut Context<S>, &T) -> (),
     E: Encoder<In = T>,
 {
-    pub fn new(topic: String, encoder: E, callback: F) -> Self {
-        Input {
+    pub fn new(topic: String, encoder: E, callback: F) -> Box<Self> {
+        Box::new(Input {
             topic,
             callback,
             encoder,
             _marker: PhantomData,
-        }
-    }
-}
-
-impl<S> Clone for Box<dyn GenericInput<S>> {
-    fn clone(&self) -> Box<dyn GenericInput<S>> {
-        self.clone_box()
-    }
-}
-
-pub trait InputClone<S> {
-    fn clone_box(&self) -> Box<dyn GenericInput<S>>;
-}
-
-impl<T, S> InputClone<S> for T
-where
-    T: 'static + GenericInput<S> + Clone,
-{
-    fn clone_box(&self) -> Box<dyn GenericInput<S>> {
-        Box::new(self.clone())
+        })
     }
 }
 
