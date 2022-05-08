@@ -41,6 +41,7 @@ fn emit_clicks_stateless(ctx: &mut Context<ClicksPerUser>, click: &Click2) {
 async fn main() {
     let settings = ClientConfig::new()
         .set("bootstrap.servers", "localhost:9092")
+        .set("partitioner", "murmur2")
         .set("group.id", "keypoints")
         .set("heartbeat.interval.ms", "250")
         .set("enable.auto.commit", "true")
