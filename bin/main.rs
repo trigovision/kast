@@ -15,11 +15,16 @@ struct ClicksPerUser {
     clicks: u32,
 }
 
+#[derive(Clone)]
+struct ExtraState {
+    shit: u32,
+}
+
 fn json_encoder<T: DeserializeOwned>(data: Option<&[u8]>) -> T {
     serde_json::from_slice(data.expect("empty message")).unwrap()
 }
 
-async fn handle_clicks_stateful(ctx: &mut Context<ClicksPerUser>, _click: Click) {
+async fn handle_clicks_stateful(ctx: &mut Context<ClicksPerUser, ExtraState>, _click: Click) {
     let mut clicks_per_user = match ctx.get_state() {
         Some(state) => state,
         None => ClicksPerUser { clicks: 0 },
@@ -29,7 +34,7 @@ async fn handle_clicks_stateful(ctx: &mut Context<ClicksPerUser>, _click: Click)
     ctx.set_state(Some(clicks_per_user))
 }
 
-async fn emit_clicks_stateless(ctx: &mut Context<ClicksPerUser>, click: Click2) {
+async fn emit_clicks_stateless(ctx: &mut Context<ClicksPerUser, ExtraState>, click: Click2) {
     let key = ctx.key();
     for _ in 0..click.clicks {
         ctx.emit("c1", &key, &Click {})
@@ -63,6 +68,7 @@ async fn main() {
             Input::new("c2".to_string(), JsonEncoder::new(), emit_clicks_stateless),
         ],
         InMemoryStateStore::new,
+        || ExtraState { shit: 100 },
     );
 
     p.run().await

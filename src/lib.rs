@@ -17,25 +17,28 @@ use rdkafka::{
 use serde::{de::DeserializeOwned, Serialize};
 use state_store::StateStore;
 
-pub struct Context<T> {
+pub struct Context<T = (), S = ()> {
     key: String,
     origingal_state: Option<T>,
     new_state: Option<T>,
     producer: FutureProducer,
     sends: Vec<DeliveryFuture>,
+    extra_state: S,
 }
 
-impl<T> Context<T>
+impl<T, S> Context<T, S>
 where
     T: Clone,
+    S: Clone,
 {
-    fn new(key: &str, state: Option<T>, producer: &FutureProducer) -> Self {
+    fn new(key: &str, state: Option<T>, producer: &FutureProducer, extra_state: S) -> Self {
         Self {
             key: key.to_string(),
             origingal_state: state,
             new_state: None,
             producer: producer.clone(),
             sends: vec![],
+            extra_state,
         }
     }
 
@@ -56,30 +59,35 @@ where
         let record = FutureRecord::to(topic).key(key).payload(&data);
         self.sends.push(self.producer.send_result(record).unwrap())
     }
+
+    pub fn extra_state(&self) -> S {
+        self.extra_state.clone()
+    }
 }
 
 #[async_trait::async_trait]
-pub trait GenericInput<S>: DynClone + Sync + Send {
+pub trait GenericInput<T, S>: DynClone + Sync + Send {
     fn topic(&self) -> String;
-    async fn handle(&self, ctx: &mut Context<S>, data: Option<&[u8]>);
+    async fn handle(&self, ctx: &mut Context<T, S>, data: Option<&[u8]>);
 }
-dyn_clone::clone_trait_object!(<S> GenericInput<S>);
+dyn_clone::clone_trait_object!(<T, S> GenericInput<T, S>);
 
-pub trait Handler<'a, S, T> {
+pub trait Handler<'a, T, S, R> {
     type Future: Future<Output = ()> + Send + 'a;
-    fn call(self, ctx: &'a mut Context<S>, req: T) -> Self::Future;
+
+    fn call(self, ctx: &'a mut Context<T, S>, req: R) -> Self::Future;
 }
 
-impl<'a, Fut, S, T, F> Handler<'a, S, T> for F
+impl<'a, Fut, T, S, R, F> Handler<'a, T, S, R> for F
 where
-    F: FnOnce(&'a mut Context<S>, T) -> Fut + Send,
+    F: FnOnce(&'a mut Context<T, S>, R) -> Fut + Send,
     Fut: Future<Output = ()> + Send + 'a,
     T: Send + 'static,
     S: Send + Sync + 'static,
 {
     type Future = Fut;
 
-    fn call(self, ctx: &'a mut Context<S>, req: T) -> Self::Future {
+    fn call(self, ctx: &'a mut Context<T, S>, req: R) -> Self::Future {
         (self)(ctx, req)
     }
 }
@@ -110,18 +118,19 @@ where
 }
 
 #[async_trait::async_trait]
-impl<T, S, F, E> GenericInput<S> for Input<T, S, F, E>
+impl<R, T, S, F, E> GenericInput<T, S> for Input<R, S, F, E>
 where
-    for<'a> F: Handler<'a, S, T> + Send + Sync + Clone + Copy,
-    E: Encoder<In = T> + Sync + Clone + Send + 'static,
-    T: Sync + Send + Clone + DeserializeOwned + 'static + std::fmt::Debug,
-    S: Clone + Send + Sync + 'static,
+    for<'a> F: Handler<'a, T, S, R> + Send + Sync + Clone + Copy,
+    E: Encoder<In = R> + Sync + Clone + Send + 'static,
+    R: Sync + Send + Clone + DeserializeOwned + 'static + std::fmt::Debug,
+    T: Clone + Send + Sync + 'static,
+    S: Send + Sync + Clone,
 {
     fn topic(&self) -> String {
         self.topic.clone()
     }
 
-    async fn handle(&self, ctx: &mut Context<S>, data: Option<&[u8]>) {
+    async fn handle(&self, ctx: &mut Context<T, S>, data: Option<&[u8]>) {
         let msg = self.encoder.encode(data);
         println!("{:?}", msg);
         // let mut write = ctx.write().await;
@@ -130,29 +139,33 @@ where
     }
 }
 
-pub struct Processor<TState, TStore, F> {
+pub struct Processor<TState, TExtraState, TStore, F1, F2> {
     pub config: ClientConfig,
-    pub inputs: HashMap<String, Box<dyn GenericInput<TState>>>,
+    pub inputs: HashMap<String, Box<dyn GenericInput<TState, TExtraState>>>,
     pub stream_consumer: Arc<StreamConsumer>,
-    state_store_gen: F,
+    state_store_gen: F1,
+    extra_state_gen: F2,
     _marker: PhantomData<(TState, TStore)>,
 }
 
-impl<TState, TStore, F> Processor<TState, TStore, F>
+impl<TState, TExtraState, TStore, F1, F2> Processor<TState, TExtraState, TStore, F1, F2>
 where
     TState: Clone + Send + Sync + 'static,
     TStore: StateStore<String, TState> + Send + Sync,
-    F: FnOnce() -> TStore + Copy + Send + 'static,
+    F1: FnOnce() -> TStore + Copy + Send + 'static,
+    F2: FnOnce() -> TExtraState + Copy + Send + 'static,
+    TExtraState: Clone + Send + 'static,
 {
     pub fn new(
         config: ClientConfig,
-        inputs: Vec<Box<dyn GenericInput<TState>>>,
-        state_store_gen: F,
+        inputs: Vec<Box<dyn GenericInput<TState, TExtraState>>>,
+        state_store_gen: F1,
+        extra_state_gen: F2,
     ) -> Self {
         let stream_consumer: StreamConsumer = config.create().unwrap();
         let stream_consumer = Arc::new(stream_consumer);
 
-        let inputs: HashMap<String, Box<dyn GenericInput<TState>>> = inputs
+        let inputs: HashMap<String, Box<dyn GenericInput<TState, TExtraState>>> = inputs
             .into_iter()
             .map(|input| (input.topic(), input))
             .collect();
@@ -162,6 +175,7 @@ where
             inputs,
             stream_consumer,
             state_store_gen,
+            extra_state_gen,
             _marker: PhantomData,
         }
     }
@@ -201,7 +215,7 @@ where
         for partition in 0..num_partitions {
             let partitioned_topics: Vec<(
                 StreamPartitionQueue<DefaultConsumerContext>,
-                Box<dyn GenericInput<TState>>,
+                Box<dyn GenericInput<TState, TExtraState>>,
             )> = self
                 .inputs
                 .iter()
@@ -216,11 +230,13 @@ where
                 .collect();
 
             let gen = self.state_store_gen.clone();
+            let gen2 = self.extra_state_gen.clone();
             let stream_consumer = self.stream_consumer.clone();
             let producer: FutureProducer = self.config.create().unwrap();
 
             tokio::spawn(async move {
                 let mut state_store = gen();
+                let extra_state = gen2();
                 // let producer = stream_consumer
                 let mut select_all = SelectAll::from_iter(
                     partitioned_topics
@@ -242,7 +258,12 @@ where
                     );
 
                     let state = state_store.get(key).await.map(|s| s.clone());
-                    let mut ctx = Context::<TState>::new(key, state, &producer);
+                    let mut ctx = Context::<TState, TExtraState>::new(
+                        key,
+                        state,
+                        &producer,
+                        extra_state.clone(),
+                    );
 
                     h.handle(&mut ctx, msg.payload()).await;
                     if let Some(state) = &ctx.new_state {
