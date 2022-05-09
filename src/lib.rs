@@ -5,7 +5,7 @@ use std::{collections::HashMap, marker::PhantomData, sync::Arc, time::Duration};
 
 use dyn_clone::DynClone;
 use encoders::Encoder;
-use futures::{future::join_all, stream::SelectAll, StreamExt};
+use futures::{future::join_all, stream::SelectAll, Future, StreamExt};
 use rdkafka::{
     consumer::{
         stream_consumer::StreamPartitionQueue, Consumer, DefaultConsumerContext, StreamConsumer,
@@ -13,33 +13,34 @@ use rdkafka::{
     producer::{DeliveryFuture, FutureProducer, FutureRecord},
     ClientConfig, Message,
 };
+
 use serde::{de::DeserializeOwned, Serialize};
 use state_store::StateStore;
 
-pub struct Context<'a, T> {
-    key: &'a str,
-    origingal_state: Option<T>, //TODO: Should I change this also to ref?
+pub struct Context<T> {
+    key: String,
+    origingal_state: Option<T>,
     new_state: Option<T>,
-    producer: &'a FutureProducer,
+    producer: FutureProducer,
     sends: Vec<DeliveryFuture>,
 }
 
-impl<'a, T> Context<'a, T>
+impl<T> Context<T>
 where
     T: Clone,
 {
-    fn new(key: &'a str, state: Option<T>, producer: &'a FutureProducer) -> Self {
+    fn new(key: &str, state: Option<T>, producer: &FutureProducer) -> Self {
         Self {
-            key,
+            key: key.to_string(),
             origingal_state: state,
             new_state: None,
-            producer,
+            producer: producer.clone(),
             sends: vec![],
         }
     }
 
-    pub fn key(&self) -> &'a str {
-        self.key
+    pub fn key(&self) -> String {
+        self.key.clone()
     }
 
     pub fn get_state(&self) -> Option<T> {
@@ -57,16 +58,35 @@ where
     }
 }
 
+#[async_trait::async_trait]
 pub trait GenericInput<S>: DynClone + Sync + Send {
     fn topic(&self) -> String;
-    fn handle(&self, ctx: &mut Context<S>, data: Option<&[u8]>);
+    async fn handle(&self, ctx: &mut Context<S>, data: Option<&[u8]>);
 }
 dyn_clone::clone_trait_object!(<S> GenericInput<S>);
+
+pub trait Handler<'a, S, T> {
+    type Future: Future<Output = ()> + Send + 'a;
+    fn call(self, ctx: &'a mut Context<S>, req: T) -> Self::Future;
+}
+
+impl<'a, Fut, S, T, F> Handler<'a, S, T> for F
+where
+    F: FnOnce(&'a mut Context<S>, T) -> Fut + Send,
+    Fut: Future<Output = ()> + Send + 'a,
+    T: Send + 'static,
+    S: Send + Sync + 'static,
+{
+    type Future = Fut;
+
+    fn call(self, ctx: &'a mut Context<S>, req: T) -> Self::Future {
+        (self)(ctx, req)
+    }
+}
 
 #[derive(Clone)]
 pub struct Input<T, S, F, E>
 where
-    F: Copy + FnOnce(&mut Context<S>, &T) -> (),
     E: Encoder<In = T>,
 {
     topic: String,
@@ -77,7 +97,6 @@ where
 
 impl<T, S, F, E> Input<T, S, F, E>
 where
-    F: Copy + FnOnce(&mut Context<S>, &T) -> (),
     E: Encoder<In = T>,
 {
     pub fn new(topic: String, encoder: E, callback: F) -> Box<Self> {
@@ -90,21 +109,24 @@ where
     }
 }
 
+#[async_trait::async_trait]
 impl<T, S, F, E> GenericInput<S> for Input<T, S, F, E>
 where
-    F: Copy + FnOnce(&mut Context<S>, &T) -> () + Sync + Clone + 'static + Send,
-    E: Encoder<In = T> + Sync + Clone + 'static + Send,
-    T: Sync + Send + Clone + DeserializeOwned + 'static,
+    for<'a> F: Handler<'a, S, T> + Send + Sync + Clone + Copy,
+    E: Encoder<In = T> + Sync + Clone + Send + 'static,
+    T: Sync + Send + Clone + DeserializeOwned + 'static + std::fmt::Debug,
     S: Clone + Send + Sync + 'static,
 {
     fn topic(&self) -> String {
         self.topic.clone()
     }
 
-    fn handle(&self, ctx: &mut Context<S>, data: Option<&[u8]>) {
+    async fn handle(&self, ctx: &mut Context<S>, data: Option<&[u8]>) {
         let msg = self.encoder.encode(data);
-        // let msg: T = serde_json::from_slice(data.expect("empty message")).unwrap();
-        (self.callback)(ctx, &msg);
+        println!("{:?}", msg);
+        // let mut write = ctx.write().await;
+        self.callback.call(ctx, msg.clone()).await;
+        println!("{:?}", msg);
     }
 }
 
@@ -118,7 +140,7 @@ pub struct Processor<TState, TStore, F> {
 
 impl<TState, TStore, F> Processor<TState, TStore, F>
 where
-    TState: Clone + Send + 'static,
+    TState: Clone + Send + Sync + 'static,
     TStore: StateStore<String, TState> + Send + Sync,
     F: FnOnce() -> TStore + Copy + Send + 'static,
 {
@@ -221,9 +243,10 @@ where
 
                     let state = state_store.get(key).await.map(|s| s.clone());
                     let mut ctx = Context::<TState>::new(key, state, &producer);
-                    h.handle(&mut ctx, msg.payload());
-                    if let Some(state) = ctx.new_state {
-                        state_store.set(key.to_string(), state).await;
+
+                    h.handle(&mut ctx, msg.payload()).await;
+                    if let Some(state) = &ctx.new_state {
+                        state_store.set(key.to_string(), state.clone()).await;
                     }
 
                     let stream_consumer = stream_consumer.clone();

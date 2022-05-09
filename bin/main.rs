@@ -19,7 +19,7 @@ fn json_encoder<T: DeserializeOwned>(data: Option<&[u8]>) -> T {
     serde_json::from_slice(data.expect("empty message")).unwrap()
 }
 
-fn handle_clicks_stateful(ctx: &mut Context<ClicksPerUser>, _click: &Click) {
+async fn handle_clicks_stateful(ctx: &mut Context<ClicksPerUser>, _click: Click) {
     let mut clicks_per_user = match ctx.get_state() {
         Some(state) => state,
         None => ClicksPerUser { clicks: 0 },
@@ -29,9 +29,10 @@ fn handle_clicks_stateful(ctx: &mut Context<ClicksPerUser>, _click: &Click) {
     ctx.set_state(Some(clicks_per_user))
 }
 
-fn emit_clicks_stateless(ctx: &mut Context<ClicksPerUser>, click: &Click2) {
+async fn emit_clicks_stateless(ctx: &mut Context<ClicksPerUser>, click: Click2) {
+    let key = ctx.key();
     for _ in 0..click.clicks {
-        ctx.emit("c1", ctx.key(), &Click {})
+        ctx.emit("c1", &key, &Click {})
     }
 }
 
