@@ -132,10 +132,7 @@ where
 
     async fn handle(&self, ctx: &mut Context<T, S>, data: Option<&[u8]>) {
         let msg = self.encoder.encode(data);
-        println!("{:?}", msg);
-        // let mut write = ctx.write().await;
         self.callback.call(ctx, msg.clone()).await;
-        println!("{:?}", msg);
     }
 }
 
@@ -152,8 +149,8 @@ impl<TState, TExtraState, TStore, F1, F2> Processor<TState, TExtraState, TStore,
 where
     TState: Clone + Send + Sync + 'static,
     TStore: StateStore<String, TState> + Send + Sync,
-    F1: FnOnce() -> TStore + Copy + Send + 'static,
-    F2: FnOnce() -> TExtraState + Copy + Send + 'static,
+    F1: FnOnce() -> TStore + Clone + Send + 'static,
+    F2: FnOnce() -> TExtraState + Clone + Send + 'static,
     TExtraState: Clone + Send + 'static,
 {
     pub fn new(
@@ -249,13 +246,6 @@ where
 
                     //TODO: Key serializer?
                     let key = std::str::from_utf8(msg.key().unwrap()).unwrap();
-
-                    println!(
-                        "Received message from partition {:?}, topic {}, key {:?}",
-                        partition,
-                        msg.topic(),
-                        msg.key(),
-                    );
 
                     let state = state_store.get(key).await.map(|s| s.clone());
                     let mut ctx = Context::<TState, TExtraState>::new(
