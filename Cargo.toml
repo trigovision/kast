@@ -16,6 +16,7 @@ path = "bin/main.rs"
 [dependencies]
 rdkafka = { version = "0.28", features = ["cmake-build"] }
 tokio = { version = "1.17.0", features = ["full"] }
+tokio-stream = { version = "0.1.8", features=["sync"]}
 futures = "0.3.21"
 tracing = "0.1.34"
 tracing-subscriber = { version = "0.3.11", features = [

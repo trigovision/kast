@@ -1,6 +1,6 @@
 use kast::{
-    context::Context, encoders::JsonEncoder, input::Input, processor::Processor,
-    state_store::InMemoryStateStore,
+    context::Context, encoders::JsonEncoder, input::Input, output::Output, processor::Processor,
+    processor_helper::KafkaProcessorHelper, state_store::InMemoryStateStore,
 };
 use rdkafka::ClientConfig;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
@@ -23,6 +23,9 @@ fn json_encoder<T: DeserializeOwned>(data: Option<&[u8]>) -> T {
 }
 
 async fn handle_clicks_stateless(ctx: &mut Context<ClicksPerUser>, _click: Click) {
+    // println!("HI");
+
+    // println!("{:?}", click);
     let mut clicks_per_user = match ctx.get_state() {
         Some(state) => state.clone(),
         None => ClicksPerUser { clicks: 0 },
@@ -33,7 +36,8 @@ async fn handle_clicks_stateless(ctx: &mut Context<ClicksPerUser>, _click: Click
     ctx.set_state(Some(clicks_per_user))
 }
 
-async fn emit_clicks_stateful(_state: &mut (), ctx: &mut Context<ClicksPerUser>, click: Click2) {
+async fn emit_clicks_stateful(ctx: &mut Context<ClicksPerUser>, click: Click2) {
+    // println!("HI2");
     let key = ctx.key().to_string();
     for _ in 0..click.clicks {
         ctx.emit("c1", &key, &Click {})
@@ -60,82 +64,70 @@ async fn main() {
         .clone();
 
     // let clicks_input = ;
-    let p = Processor::new(
-        settings,
+    let mut p = Processor::new(
+        KafkaProcessorHelper::new(settings),
         vec![
             Input::new("c1".to_string(), json_encoder, handle_clicks_stateless),
             Input::new("c2".to_string(), JsonEncoder::new(), emit_clicks_stateful),
         ],
-        vec![],
-        InMemoryStateStore::new,
+        vec![Output::new("c1".to_string())],
+        InMemoryStateStore::<String, ClicksPerUser>::new,
         || (),
     );
 
-    p.run().await
+    p.run().await;
+    p.join().await
 }
 
 #[cfg(test)]
 mod tests {
-    use crate::{emit_clicks_stateful, handle_clicks_stateless, json_encoder, Click, Click2};
+    use crate::{
+        emit_clicks_stateful, handle_clicks_stateless, json_encoder, Click, Click2, ClicksPerUser,
+    };
     use futures::future::join_all;
     use kast::{
         encoders::{JsonDecoder, JsonEncoder},
         input::Input,
         output::Output,
+        processor::Processor,
+        processor_helper::TestsProcessorHelper,
         state_store::InMemoryStateStore,
-        test_utils::TestProcessor,
     };
     use rstest::rstest;
 
     #[rstest]
     #[tokio::test]
     async fn test_single_store() {
-        let mut p = TestProcessor::new(
+        let mut t = TestsProcessorHelper::new();
+        let mut in1 = t.input("c1".to_string(), JsonDecoder::new());
+        let mut in2 = t.input("c2".to_string(), JsonDecoder::new());
+        let mut out = t.output("c1".to_string(), JsonEncoder::<Click>::new());
+
+        let mut p = Processor::new(
+            t,
             vec![
                 Input::new("c1".to_string(), json_encoder, handle_clicks_stateless),
                 Input::new("c2".to_string(), JsonEncoder::new(), emit_clicks_stateful),
             ],
-            vec![Output::new("c1".to_string())],
-            InMemoryStateStore::new,
+            vec![Output::new("c1".to_string())], //TODO: This will still work if this line is removed because we have input with the same topic
+            InMemoryStateStore::<String, ClicksPerUser>::new,
             || (),
         );
-
-        let mut in1 = p.input("c1".to_string(), JsonDecoder::new());
-        let mut in2 = p.input("c2".to_string(), JsonDecoder::new());
-        let mut out = p.output("c1".to_string(), JsonEncoder::<Click>::new());
-
-        let task = tokio::spawn(async move {
-            p.run().await;
-        });
+        p.run().await;
+        let task = tokio::spawn(async move { p.join().await });
 
         in1.send("a".to_string(), &Click {}).await.unwrap();
-        in2.send("a".to_string(), &Click2 { clicks: 5 })
+        in2.send("a".to_string(), &Click2 { clicks: 10000 })
             .await
             .unwrap();
-        let shit = out.recv().await;
-        println!("!!!! {:?}", shit);
-        let shit = out.recv().await;
-        println!("!!!! {:?}", shit);
-        let shit = out.recv().await;
-        println!("!!!! {:?}", shit);
-        let shit = out.recv().await;
-        println!("!!!! {:?}", shit);
-        let shit = out.recv().await;
-        println!("!!!! {:?}", shit);
-        let shit = out.recv().await;
-        println!("!!!! {:?}", shit);
-        let shit = out.recv().await;
-        println!("!!!! {:?}", shit);
-        let shit = out.recv().await;
-        println!("!!!! {:?}", shit);
-        let shit = out.recv().await;
-        println!("!!!! {:?}", shit);
-        let shit = out.recv().await;
-        println!("!!!! {:?}", shit);
-        let shit = out.recv().await;
-        println!("!!!! {:?}", shit);
-        let shit = out.recv().await;
-        println!("!!!! {:?}", shit);
+
+        for _i in 0..10001 {
+            out.recv().await.unwrap();
+        }
+
+        assert!(out.try_recv().is_err());
+
+        // println!("!!!! {:?}", shit);
         join_all(vec![task]).await;
     }
 }
