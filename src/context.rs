@@ -7,6 +7,7 @@ pub struct Context<T = ()> {
     sends: Vec<FutureDeliverableMessage>,
 }
 
+#[derive(Clone)]
 pub struct FutureDeliverableMessage {
     pub topic: String,
     pub key: String,
@@ -23,6 +24,7 @@ where
             origingal_state: state,
             new_state: None,
             sends: vec![],
+            // deserializers: HashMap::new(),
         }
     }
 
@@ -43,12 +45,13 @@ where
     }
 
     pub fn emit<M: Serialize>(&mut self, topic: &str, key: &str, msg: &M) {
+        // let output = self.deserializers.get(topic).unwrap();
         let data = serde_json::to_vec(msg).unwrap();
         self.sends.push(FutureDeliverableMessage {
             topic: topic.to_string(),
             key: key.to_string(),
             payload: data,
-        })
+        });
     }
 
     pub fn to_send(self) -> Vec<FutureDeliverableMessage> {

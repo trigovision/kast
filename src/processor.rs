@@ -9,14 +9,15 @@ use rdkafka::{
     ClientConfig, Message,
 };
 
-use crate::{context::Context, input::GenericInput, state_store::StateStore};
+use crate::{context::Context, input::GenericInput, output::Output, state_store::StateStore};
 
 pub struct Processor<TState, TExtraState, TStore, F1, F2> {
-    pub config: ClientConfig,
-    pub inputs: HashMap<String, Box<dyn GenericInput<TState, TExtraState>>>,
-    pub stream_consumer: Arc<StreamConsumer>,
+    config: ClientConfig,
+    inputs: HashMap<String, Box<dyn GenericInput<TState, TExtraState>>>,
+    stream_consumer: Arc<StreamConsumer>,
     state_store_gen: F1,
     extra_state_gen: F2,
+    outputs: Vec<Output>,
     _marker: PhantomData<(TState, TStore)>,
 }
 
@@ -31,6 +32,7 @@ where
     pub fn new(
         config: ClientConfig,
         inputs: Vec<Box<dyn GenericInput<TState, TExtraState>>>,
+        outputs: Vec<Output>,
         state_store_gen: F1,
         extra_state_gen: F2,
     ) -> Self {
@@ -45,6 +47,7 @@ where
         Processor {
             config,
             inputs,
+            outputs,
             stream_consumer,
             state_store_gen,
             extra_state_gen,
@@ -123,7 +126,7 @@ where
                     let key = std::str::from_utf8(msg.key().unwrap()).unwrap();
 
                     let state = state_store.get(key).await.map(|s| s.clone());
-                    let mut ctx = Context::<TState>::new(key, state);
+                    let mut ctx = Context::new(key, state);
 
                     h.handle(&mut extra_state, &mut ctx, msg.payload()).await;
                     if let Some(state) = &ctx.get_state() {
@@ -136,15 +139,15 @@ where
                     let msg_offset = msg.offset();
 
                     let producer = producer.clone();
+                    // NOTE: It is extremly important that this will happen here and not inside the spawn to gurantee order of msgs!
+                    let sends = ctx.to_send().into_iter().map(move |s| {
+                        producer
+                            .send_result(FutureRecord::to(&s.topic).key(&s.key).payload(&s.payload))
+                            .unwrap()
+                    });
+
                     tokio::spawn(async move {
-                        join_all(ctx.to_send().into_iter().map(|s| {
-                            producer
-                                .send_result(
-                                    FutureRecord::to(&s.topic).key(&s.key).payload(&s.payload),
-                                )
-                                .unwrap()
-                        }))
-                        .await;
+                        join_all(sends).await;
                         stream_consumer
                             .store_offset(&msg_topic, msg_partition, msg_offset)
                             .unwrap();
