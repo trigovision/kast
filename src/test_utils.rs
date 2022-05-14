@@ -110,7 +110,7 @@ where
         let tx_hashmap_from_out_to_in: HashMap<String, UnboundedSender<OwnedMessage>> = self
             .inputs
             .iter()
-            .map(|(t, (a, (tx, rx)))| (t.to_string(), tx.clone()))
+            .map(|(t, (_a, (tx, _rx)))| (t.to_string(), tx.clone()))
             .collect();
 
         let mut select_all = SelectAll::from_iter(

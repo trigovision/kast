@@ -22,50 +22,18 @@ fn json_encoder<T: DeserializeOwned>(data: Option<&[u8]>) -> T {
     serde_json::from_slice(data.expect("empty message")).unwrap()
 }
 
-#[derive(Debug)]
-struct MyStateInternal {}
-
-#[async_trait::async_trait]
-pub trait StatefulHandler<S, T> {
-    async fn handle(&mut self, ctx: &mut Context<S>, msg: T);
-}
-
-#[async_trait::async_trait]
-impl StatefulHandler<ClicksPerUser, Click> for MyStateInternal {
-    async fn handle(&mut self, ctx: &mut Context<ClicksPerUser>, msg: Click) {
-        let mut clicks_per_user = match ctx.get_state() {
-            Some(state) => state.clone(),
-            None => ClicksPerUser { clicks: 0 },
-        };
-        clicks_per_user.clicks += 1;
-        println!("Hi {:?}", self);
-        // state.shit *= 2;
-        ctx.set_state(Some(clicks_per_user))
-    }
-}
-
-#[async_trait::async_trait]
-impl StatefulHandler<ClicksPerUser, Click2> for MyStateInternal {
-    async fn handle(&mut self, ctx: &mut Context<ClicksPerUser>, msg: Click2) {
-        let key = ctx.key().to_string();
-        for _ in 0..msg.clicks {
-            ctx.emit("c1", &key, &Click {})
-        }
-    }
-}
-
-async fn handle_clicks_stateful(state: &mut (), ctx: &mut Context<ClicksPerUser>, _click: Click) {
+async fn handle_clicks_stateless(ctx: &mut Context<ClicksPerUser>, _click: Click) {
     let mut clicks_per_user = match ctx.get_state() {
         Some(state) => state.clone(),
         None => ClicksPerUser { clicks: 0 },
     };
     clicks_per_user.clicks += 1;
-    println!("Hi {:?}", state);
+    // println!("Hi {:?}", state);
     // state.shit *= 2;
     ctx.set_state(Some(clicks_per_user))
 }
 
-async fn emit_clicks_stateless(_state: &mut (), ctx: &mut Context<ClicksPerUser>, click: Click2) {
+async fn emit_clicks_stateful(_state: &mut (), ctx: &mut Context<ClicksPerUser>, click: Click2) {
     let key = ctx.key().to_string();
     for _ in 0..click.clicks {
         ctx.emit("c1", &key, &Click {})
@@ -95,8 +63,8 @@ async fn main() {
     let p = Processor::new(
         settings,
         vec![
-            Input::new("c1".to_string(), json_encoder, handle_clicks_stateful),
-            Input::new("c2".to_string(), JsonEncoder::new(), emit_clicks_stateless),
+            Input::new("c1".to_string(), json_encoder, handle_clicks_stateless),
+            Input::new("c2".to_string(), JsonEncoder::new(), emit_clicks_stateful),
         ],
         vec![],
         InMemoryStateStore::new,
@@ -108,7 +76,7 @@ async fn main() {
 
 #[cfg(test)]
 mod tests {
-    use crate::{emit_clicks_stateless, handle_clicks_stateful, json_encoder, Click, Click2};
+    use crate::{emit_clicks_stateful, handle_clicks_stateless, json_encoder, Click, Click2};
     use futures::future::join_all;
     use kast::{
         encoders::{JsonDecoder, JsonEncoder},
@@ -124,8 +92,8 @@ mod tests {
     async fn test_single_store() {
         let mut p = TestProcessor::new(
             vec![
-                Input::new("c1".to_string(), json_encoder, handle_clicks_stateful),
-                Input::new("c2".to_string(), JsonEncoder::new(), emit_clicks_stateless),
+                Input::new("c1".to_string(), json_encoder, handle_clicks_stateless),
+                Input::new("c2".to_string(), JsonEncoder::new(), emit_clicks_stateful),
             ],
             vec![Output::new("c1".to_string())],
             InMemoryStateStore::new,

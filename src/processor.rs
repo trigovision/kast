@@ -17,7 +17,7 @@ pub struct Processor<TState, TExtraState, TStore, F1, F2> {
     stream_consumer: Arc<StreamConsumer>,
     state_store_gen: F1,
     extra_state_gen: F2,
-    outputs: Vec<Output>,
+    _outputs: Vec<Output>,
     _marker: PhantomData<(TState, TStore)>,
 }
 
@@ -47,7 +47,7 @@ where
         Processor {
             config,
             inputs,
-            outputs,
+            _outputs: outputs,
             stream_consumer,
             state_store_gen,
             extra_state_gen,
