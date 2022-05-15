@@ -75,7 +75,7 @@ async fn main() {
         || (),
     );
 
-    p.run().await;
+    p.start().await;
     p.join().await
 }
 
@@ -113,8 +113,7 @@ mod tests {
             InMemoryStateStore::<String, ClicksPerUser>::new,
             || (),
         );
-        p.run().await;
-        let task = tokio::spawn(async move { p.join().await });
+        p.start().await;
 
         in1.send("a".to_string(), &Click {}).await.unwrap();
         in2.send("a".to_string(), &Click2 { clicks: 10000 })
@@ -126,8 +125,5 @@ mod tests {
         }
 
         assert!(out.try_recv().is_err());
-
-        // println!("!!!! {:?}", shit);
-        join_all(vec![task]).await;
     }
 }

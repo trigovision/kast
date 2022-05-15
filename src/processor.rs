@@ -27,7 +27,6 @@ where
     F1: FnOnce() -> TStore + Copy + Send + 'static,
     F2: FnOnce() -> TExtraState + Copy + Send + 'static,
     TExtraState: Send + 'static,
-    //TODO: Refine the constraints?
     H: KafkaProcessorImplementor + Sync + 'static,
     <H::DeliveryFutureType as futures::Future>::Output: Send,
 {
@@ -53,7 +52,7 @@ where
         }
     }
 
-    pub async fn run(&mut self) {
+    pub async fn start(&mut self) {
         let input_topcis_set: HashSet<String> = self.inputs.keys().cloned().collect();
         let output_topcis_set: HashSet<String> =
             self.outputs.iter().map(|o| o.topic().to_string()).collect();
@@ -129,6 +128,7 @@ where
         }
     }
 
+    // TODO: Can we move it back to run and support something to notify initialization?
     pub async fn join(self) {
         let input_topcis_set: HashSet<String> = self.inputs.keys().cloned().collect();
 
