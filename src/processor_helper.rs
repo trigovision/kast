@@ -3,7 +3,10 @@ use std::{
     fmt::Debug,
     marker::PhantomData,
     pin::Pin,
-    sync::Arc,
+    sync::{
+        atomic::{AtomicU32, Ordering},
+        Arc,
+    },
     time::Duration,
 };
 
@@ -18,7 +21,7 @@ use rdkafka::{
     ClientConfig, Message,
 };
 use serde::Serialize;
-use tokio::sync::broadcast::error::SendError;
+use tokio::{sync::broadcast::error::SendError, time::sleep};
 use tokio_stream::wrappers::{errors::BroadcastStreamRecvError, BroadcastStream};
 
 use crate::encoders::{Decoder, Encoder};
@@ -81,8 +84,6 @@ where
         P: ToBytes + ?Sized;
 
     fn store_offset(&self, topic: &str, partition: i32, offset: i64) -> KafkaResult<()>;
-
-    fn notify_partition_handler_done(&self, partition: i32);
 
     fn wait_to_finish(
         self,
@@ -199,8 +200,6 @@ impl KafkaProcessorImplementor for KafkaProcessorHelper {
         self.stream_consumer.store_offset(topic, partition, offset)
     }
 
-    fn notify_partition_handler_done(&self, partition: i32) {}
-
     fn wait_to_finish(
         self,
         topics: &HashSet<String>,
@@ -236,18 +235,33 @@ impl KafkaProcessorImplementor for KafkaProcessorHelper {
 }
 
 #[derive(Clone)]
+pub struct TopicTestHelper {
+    ch: tokio::sync::broadcast::Sender<OwnedMessage>,
+    sent: Arc<AtomicU32>,
+    recv: Arc<AtomicU32>,
+}
+
+impl Default for TopicTestHelper {
+    fn default() -> Self {
+        let (tx, _rx) = tokio::sync::broadcast::channel(1_000_000);
+
+        Self {
+            ch: tx,
+            sent: Default::default(),
+            recv: Default::default(),
+        }
+    }
+}
+
+#[derive(Clone)]
 pub struct TestsProcessorHelper {
-    topics: HashMap<String, tokio::sync::broadcast::Sender<OwnedMessage>>,
-    done: tokio::sync::broadcast::Sender<()>,
+    topics: HashMap<String, TopicTestHelper>,
 }
 
 impl TestsProcessorHelper {
     pub fn new() -> Self {
-        let (tx, _rx) = tokio::sync::broadcast::channel(100);
-
         Self {
             topics: HashMap::new(),
-            done: tx,
         }
     }
 }
@@ -258,24 +272,24 @@ impl TestsProcessorHelper {
         F: Decoder,
         T: Serialize,
     {
-        let input = self.topics.entry(topic.to_string()).or_insert({
-            let (tx, _rx) = tokio::sync::broadcast::channel(1_000_000);
-            tx
-        });
+        let input = self
+            .topics
+            .entry(topic.to_string())
+            .or_insert(TopicTestHelper::default());
 
-        Sender::new(decoder, input.clone())
+        Sender::new(topic, decoder, input.ch.clone(), input.sent.clone())
     }
 
     pub fn output<E, T>(&mut self, topic: String, encoder: E) -> Receiver<T, E>
     where
         E: Encoder<In = T>,
     {
-        let output = self.topics.entry(topic.to_string()).or_insert({
-            let (tx, _rx) = tokio::sync::broadcast::channel(1_000_000);
-            tx
-        });
+        let output = self
+            .topics
+            .entry(topic.to_string())
+            .or_insert(TopicTestHelper::default());
 
-        Receiver::new(encoder, output.subscribe())
+        Receiver::new(encoder, output.ch.subscribe())
     }
 }
 
@@ -290,17 +304,15 @@ impl KafkaProcessorImplementor for TestsProcessorHelper {
         output_topics: &HashSet<String>,
     ) -> Result<usize, ()> {
         for topic in input_topics {
-            self.topics.entry(topic.to_string()).or_insert({
-                let (tx, _rx) = tokio::sync::broadcast::channel(1_000_000);
-                tx
-            });
+            self.topics
+                .entry(topic.to_string())
+                .or_insert(TopicTestHelper::default());
         }
 
         for topic in output_topics {
-            self.topics.entry(topic.to_string()).or_insert({
-                let (tx, _rx) = tokio::sync::broadcast::channel(1_000_000);
-                tx
-            });
+            self.topics
+                .entry(topic.to_string())
+                .or_insert(TopicTestHelper::default());
         }
 
         Ok(1)
@@ -311,7 +323,7 @@ impl KafkaProcessorImplementor for TestsProcessorHelper {
         topic_name: &str,
         _partition: u16,
     ) -> Self::OwnedStreamableType {
-        BroadcastStream::new(self.topics.get(topic_name).unwrap().subscribe())
+        BroadcastStream::new(self.topics.get(topic_name).unwrap().ch.subscribe())
     }
 
     fn send_result<'a, K, P>(
@@ -332,16 +344,24 @@ impl KafkaProcessorImplementor for TestsProcessorHelper {
             None,
         );
 
-        self.topics.get(record.topic).unwrap().send(msg).unwrap();
+        self.topics
+            .get(record.topic)
+            .unwrap()
+            .sent
+            .fetch_add(1, Ordering::Relaxed);
+
+        self.topics.get(record.topic).unwrap().ch.send(msg).unwrap();
         Ok(Box::pin(async move { () }))
     }
 
-    fn store_offset(&self, _topic: &str, _partition: i32, _offset: i64) -> KafkaResult<()> {
-        Ok(())
-    }
+    fn store_offset(&self, topic: &str, _partition: i32, _offset: i64) -> KafkaResult<()> {
+        self.topics
+            .get(topic)
+            .unwrap()
+            .recv
+            .fetch_add(1, Ordering::Relaxed);
 
-    fn notify_partition_handler_done(&self, _partition: i32) {
-        self.done.send(()).unwrap();
+        Ok(())
     }
 
     fn wait_to_finish(
@@ -349,12 +369,19 @@ impl KafkaProcessorImplementor for TestsProcessorHelper {
         _topics: &HashSet<String>,
     ) -> tokio::task::JoinHandle<Result<(), String>> {
         let task = tokio::spawn(async move {
-            //TODO: Fix this
-            self.done
-                .subscribe()
-                .recv()
-                .await
-                .map_err(|e| e.to_string())
+            // while let Some(_) = select_all.next().await {}
+            loop {
+                if self.topics.iter().all(|(_t, stats)| {
+                    let r = stats.recv.load(Ordering::Relaxed);
+                    let s = stats.sent.load(Ordering::Relaxed);
+                    s == r
+                }) {
+                    break;
+                }
+                sleep(Duration::from_nanos(0)).await;
+            }
+
+            Ok(())
         });
 
         task
@@ -366,8 +393,10 @@ pub struct Sender<T, F>
 where
     F: Decoder,
 {
+    topic: String,
     decoder: F,
     tx: tokio::sync::broadcast::Sender<OwnedMessage>,
+    sem: Arc<AtomicU32>,
     _marker: PhantomData<T>,
 }
 
@@ -376,10 +405,17 @@ where
     F: Decoder,
     T: Serialize,
 {
-    fn new(decoder: F, tx: tokio::sync::broadcast::Sender<OwnedMessage>) -> Self {
+    fn new(
+        topic: String,
+        decoder: F,
+        tx: tokio::sync::broadcast::Sender<OwnedMessage>,
+        sem: Arc<AtomicU32>,
+    ) -> Self {
         Self {
+            topic,
             decoder,
             tx,
+            sem,
             _marker: PhantomData,
         }
     }
@@ -389,12 +425,14 @@ where
         let msg = OwnedMessage::new(
             Some(data),
             Some(key.as_bytes().to_vec()),
-            "".to_string(),
+            self.topic.clone(),
             rdkafka::Timestamp::NotAvailable,
             0,
             0,
             None,
         );
+
+        self.sem.fetch_add(1, Ordering::Relaxed);
         self.tx.send(msg)
     }
 }

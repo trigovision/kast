@@ -3,7 +3,7 @@ use std::{
     marker::PhantomData,
 };
 
-use futures::{future::join_all, stream::SelectAll, StreamExt};
+use futures::{future::join_all, stream::select_all, StreamExt};
 use rdkafka::{producer::FutureRecord, Message};
 
 use crate::{
@@ -73,7 +73,7 @@ where
                 .map(|(topic_name, input_handler)| {
                     (
                         self.helper
-                            .create_partitioned_consumer(topic_name, partition as u16), //TODO: Does it work with multiple consumers?
+                            .create_partitioned_consumer(topic_name, partition as u16), //TODO: Does it work with multiple consumer?
                         input_handler.clone(),
                     )
                 })
@@ -91,7 +91,7 @@ where
                     .into_iter()
                     .map(|(a, h)| Box::pin(a).map(move |msg| (h.clone(), msg)));
 
-                let mut select_all = SelectAll::from_iter(iter);
+                let mut select_all = select_all(iter);
 
                 while let Some((h, msg)) = select_all.next().await {
                     let msg = msg.unwrap();
@@ -129,8 +129,6 @@ where
                             .unwrap();
                     });
                 }
-
-                helper.notify_partition_handler_done(partition as i32)
             });
         }
     }
