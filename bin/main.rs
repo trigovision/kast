@@ -1,6 +1,8 @@
+use std::collections::HashMap;
+
 use kast::{
     context::Context, encoders::JsonEncoder, input::Input, output::Output, processor::Processor,
-    processor_helper::KafkaProcessorHelper, state_store::InMemoryStateStore,
+    processor_helper::KafkaProcessorHelper,
 };
 use rdkafka::ClientConfig;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
@@ -23,7 +25,7 @@ fn json_encoder<T: DeserializeOwned>(data: Option<&[u8]>) -> T {
 }
 
 async fn handle_clicks_stateless(ctx: &mut Context<ClicksPerUser>, _click: Click) {
-    // println!("HI");
+    println!("HI");
 
     // println!("{:?}", click);
     let mut clicks_per_user = match ctx.get_state() {
@@ -71,7 +73,7 @@ async fn main() {
             Input::new("c2".to_string(), JsonEncoder::new(), emit_clicks_stateful),
         ],
         vec![Output::new("c1".to_string())],
-        InMemoryStateStore::<String, ClicksPerUser>::new,
+        HashMap::<String, ClicksPerUser>::new,
         || (),
     );
 
@@ -81,27 +83,28 @@ async fn main() {
 
 #[cfg(test)]
 mod tests {
+    use std::{borrow::Borrow, collections::HashMap, sync::Arc};
+
     use crate::{
         emit_clicks_stateful, handle_clicks_stateless, json_encoder, Click, Click2, ClicksPerUser,
     };
-    use futures::future::join_all;
     use kast::{
         encoders::{JsonDecoder, JsonEncoder},
         input::Input,
         output::Output,
         processor::Processor,
         processor_helper::TestsProcessorHelper,
-        state_store::InMemoryStateStore,
+        state_store::StateStore,
     };
     use rstest::rstest;
+    use tokio::sync::RwLock;
 
     #[rstest]
     #[tokio::test]
     async fn test_single_store() {
         let mut t = TestsProcessorHelper::new();
-        let mut in1 = t.input("c1".to_string(), JsonDecoder::new());
-        let mut in2 = t.input("c2".to_string(), JsonDecoder::new());
-        let mut out = t.output("c1".to_string(), JsonEncoder::<Click>::new());
+        let state_store = Arc::new(RwLock::new(HashMap::new()));
+        let state_store_clone = state_store.clone();
 
         let mut p = Processor::new(
             t,
@@ -110,20 +113,26 @@ mod tests {
                 Input::new("c2".to_string(), JsonEncoder::new(), emit_clicks_stateful),
             ],
             vec![Output::new("c1".to_string())], //TODO: This will still work if this line is removed because we have input with the same topic
-            InMemoryStateStore::<String, ClicksPerUser>::new,
+            move || state_store_clone.clone(),
             || (),
         );
-        p.start().await;
 
-        in1.send("a".to_string(), &Click {}).await.unwrap();
-        in2.send("a".to_string(), &Click2 { clicks: 10000 })
-            .await
-            .unwrap();
+        {
+            let mut in1 = p.helper().input("c1".to_string(), JsonDecoder::new());
+            let mut in2 = p.helper().input("c2".to_string(), JsonDecoder::new());
+            // let mut out = t.output("c1".to_string(), JsonEncoder::<Click>::new());
 
-        for _i in 0..10001 {
-            out.recv().await.unwrap();
+            p.start().await;
+
+            in1.send("a".to_string(), &Click {}).await.unwrap();
+            in2.send("a".to_string(), &Click2 { clicks: 10 })
+                .await
+                .unwrap();
         }
 
-        assert!(out.try_recv().is_err());
+        p.join().await;
+
+        let final_state: ClicksPerUser = state_store.get("a").await.unwrap();
+        println!("{:?}", final_state);
     }
 }

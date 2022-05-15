@@ -24,9 +24,10 @@ impl<TState, TExtraState, TStore, F1, F2, H> Processor<TState, TExtraState, TSto
 where
     TState: Clone + Send + Sync + 'static,
     TStore: StateStore<String, TState> + Send + Sync,
-    F1: FnOnce() -> TStore + Copy + Send + 'static,
-    F2: FnOnce() -> TExtraState + Copy + Send + 'static,
+    F1: FnOnce() -> TStore + Send + Clone + 'static,
+    F2: FnOnce() -> TExtraState + Clone + Send + 'static,
     TExtraState: Send + 'static,
+    //TODO: Refine the constraints?
     H: KafkaProcessorImplementor + Sync + 'static,
     <H::DeliveryFutureType as futures::Future>::Output: Send,
 {
@@ -50,6 +51,10 @@ where
             extra_state_gen,
             _marker: PhantomData,
         }
+    }
+
+    pub fn helper(&mut self) -> &mut H {
+        &mut self.helper
     }
 
     pub async fn start(&mut self) {
@@ -98,7 +103,7 @@ where
                     let mut ctx = Context::new(key, state);
 
                     h.handle(&mut extra_state, &mut ctx, msg.payload()).await;
-                    if let Some(state) = &ctx.get_state() {
+                    if let Some(state) = &ctx.get_new_state() {
                         state_store.set(key.to_string(), state.clone()).await;
                     }
 
@@ -124,6 +129,8 @@ where
                             .unwrap();
                     });
                 }
+
+                helper.notify_partition_handler_done(partition as i32)
             });
         }
     }

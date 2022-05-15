@@ -49,7 +49,7 @@ impl Stream for ShittyKafkaShit {
     }
 }
 
-pub trait KafkaProcessorImplementor: Clone + Send
+pub trait KafkaProcessorImplementor: Send + Clone
 where
     <Self::DeliveryFutureType as futures::Future>::Output: Send,
 {
@@ -82,11 +82,32 @@ where
 
     fn store_offset(&self, topic: &str, partition: i32, offset: i64) -> KafkaResult<()>;
 
+    fn notify_partition_handler_done(&self, partition: i32);
+
     fn wait_to_finish(
-        &self,
+        self,
         topics: &HashSet<String>,
     ) -> tokio::task::JoinHandle<Result<(), String>>;
 }
+
+// pub trait PartitionedProcessorHelper: Send
+// where
+//     <Self::DeliveryFutureType as futures::Future>::Output: Send,
+// {
+//     type DeliveryFutureType: futures::Future + Send;
+
+//     fn send_result<'a, K, P>(
+//         &self,
+//         record: FutureRecord<'a, K, P>,
+//     ) -> Result<Self::DeliveryFutureType, (KafkaError, FutureRecord<'a, K, P>)>
+//     where
+//         K: ToBytes + ?Sized,
+//         P: ToBytes + ?Sized;
+
+//     fn store_offset(&self, topic: &str, partition: i32, offset: i64) -> KafkaResult<()>;
+
+//     fn notify_partition_handler_done(&self, partition: i32);
+// }
 
 #[derive(Clone)]
 pub struct KafkaProcessorHelper {
@@ -178,8 +199,10 @@ impl KafkaProcessorImplementor for KafkaProcessorHelper {
         self.stream_consumer.store_offset(topic, partition, offset)
     }
 
+    fn notify_partition_handler_done(&self, partition: i32) {}
+
     fn wait_to_finish(
-        &self,
+        self,
         topics: &HashSet<String>,
     ) -> tokio::task::JoinHandle<Result<(), String>> {
         let stream_consumer = self.stream_consumer.clone();
@@ -215,20 +238,16 @@ impl KafkaProcessorImplementor for KafkaProcessorHelper {
 #[derive(Clone)]
 pub struct TestsProcessorHelper {
     topics: HashMap<String, tokio::sync::broadcast::Sender<OwnedMessage>>,
-    // outputs: HashMap<
-    //     String,
-    //     (
-    //         UnboundedSender<OwnedMessage>,
-    //         Arc<RwLock<UnboundedReceiver<OwnedMessage>>>,
-    //     ),
-    // >,
+    done: tokio::sync::broadcast::Sender<()>,
 }
 
 impl TestsProcessorHelper {
     pub fn new() -> Self {
+        let (tx, _rx) = tokio::sync::broadcast::channel(100);
+
         Self {
             topics: HashMap::new(),
-            // outputs: HashMap::new(),
+            done: tx,
         }
     }
 }
@@ -321,12 +340,24 @@ impl KafkaProcessorImplementor for TestsProcessorHelper {
         Ok(())
     }
 
+    fn notify_partition_handler_done(&self, _partition: i32) {
+        self.done.send(()).unwrap();
+    }
+
     fn wait_to_finish(
-        &self,
+        self,
         _topics: &HashSet<String>,
     ) -> tokio::task::JoinHandle<Result<(), String>> {
-        let shit = Box::pin(async move { Ok(()) });
-        tokio::spawn(shit)
+        let task = tokio::spawn(async move {
+            //TODO: Fix this
+            self.done
+                .subscribe()
+                .recv()
+                .await
+                .map_err(|e| e.to_string())
+        });
+
+        task
     }
 }
 
