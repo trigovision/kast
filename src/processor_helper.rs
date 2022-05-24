@@ -63,11 +63,13 @@ where
         + 'static;
     type DeliveryFutureType: futures::Future + Send;
 
-    fn validate_inputs_outputs(
+    fn prepare_input_outputs(
         &mut self,
         input_topics: &HashSet<String>,
         output_topics: &HashSet<String>,
-    ) -> Result<usize, ()>;
+    ) -> Result<(), ()>;
+
+    fn ensure_copartitioned(&mut self) -> Result<usize, ()>;
 
     fn create_partitioned_consumer(
         &self,
@@ -114,6 +116,7 @@ where
 pub struct KafkaProcessorHelper {
     pub(crate) stream_consumer: Arc<StreamConsumer>,
     future_producer: FutureProducer,
+    inputs: HashSet<String>,
 }
 
 impl KafkaProcessorHelper {
@@ -125,12 +128,13 @@ impl KafkaProcessorHelper {
         Self {
             stream_consumer,
             future_producer,
+            inputs: HashSet::new(),
         }
     }
 }
 
 impl KafkaProcessorHelper {
-    fn check_that_inputs_are_copartitioned(&self, topics: &HashSet<String>) -> Result<usize, ()> {
+    fn check_that_inputs_are_copartitioned(&self) -> Result<usize, ()> {
         let shit = self
             .stream_consumer
             .fetch_metadata(None, Duration::from_secs(1))
@@ -139,7 +143,7 @@ impl KafkaProcessorHelper {
         let topics_partitions: Vec<(String, usize)> = shit
             .topics()
             .iter()
-            .filter(|topic| topics.contains(topic.name()))
+            .filter(|topic| self.inputs.contains(topic.name()))
             .map(|topic| (topic.name().to_string(), topic.partitions().len()))
             .collect();
 
@@ -163,12 +167,12 @@ impl KafkaProcessorImplementor for KafkaProcessorHelper {
     type OwnedStreamableType = ShittyKafkaShit;
     type DeliveryFutureType = DeliveryFuture;
 
-    fn validate_inputs_outputs(
+    fn prepare_input_outputs(
         &mut self,
         input_topics: &HashSet<String>,
         _output_topics: &HashSet<String>,
-    ) -> Result<usize, ()> {
-        self.check_that_inputs_are_copartitioned(input_topics)
+    ) -> Result<(), ()> {
+        Ok(())
     }
 
     fn create_partitioned_consumer(
@@ -231,6 +235,10 @@ impl KafkaProcessorImplementor for KafkaProcessorHelper {
         });
 
         task
+    }
+
+    fn ensure_copartitioned(&mut self) -> Result<usize, ()> {
+        self.check_that_inputs_are_copartitioned()
     }
 }
 
@@ -314,12 +322,21 @@ impl KafkaProcessorImplementor for TestsProcessorHelper {
     type OwnedStreamableType = BroadcastStream<OwnedMessage>;
     type DeliveryFutureType = Pin<Box<dyn futures::Future<Output = ()> + Send>>;
 
-    fn validate_inputs_outputs(
+    fn prepare_input_outputs(
         &mut self,
-        _input_topics: &HashSet<String>,
-        _output_topics: &HashSet<String>,
-    ) -> Result<usize, ()> {
-        Ok(1)
+        input_topics: &HashSet<String>,
+        output_topics: &HashSet<String>,
+    ) -> Result<(), ()> {
+        for (k, v) in self.topics.iter_mut() {
+            if input_topics.contains(k) {
+                v.input = true;
+            }
+
+            if output_topics.contains(k) {
+                v.output = true;
+            }
+        }
+        Ok(())
     }
 
     fn create_partitioned_consumer(
@@ -348,18 +365,9 @@ impl KafkaProcessorImplementor for TestsProcessorHelper {
             None,
         );
 
-        self.topics
-            .get(record.topic)
-            .unwrap()
-            .sent
-            .fetch_add(1, Ordering::Relaxed);
-
-        self.topics
-            .get(record.topic)
-            .unwrap()
-            .ch_tx
-            .send(msg)
-            .unwrap();
+        let rec = self.topics.get(record.topic).unwrap();
+        rec.sent.fetch_add(1, Ordering::Relaxed);
+        rec.ch_tx.send(msg).unwrap();
         Ok(Box::pin(async move { () }))
     }
 
@@ -401,6 +409,10 @@ impl KafkaProcessorImplementor for TestsProcessorHelper {
         });
 
         task
+    }
+
+    fn ensure_copartitioned(&mut self) -> Result<usize, ()> {
+        Ok(1)
     }
 }
 

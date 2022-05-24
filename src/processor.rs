@@ -61,10 +61,12 @@ where
         let input_topcis_set: HashSet<String> = self.inputs.keys().cloned().collect();
         let output_topcis_set: HashSet<String> =
             self.outputs.iter().map(|o| o.topic().to_string()).collect();
-        let num_partitions = self
-            .helper
-            .validate_inputs_outputs(&input_topcis_set, &output_topcis_set)
+
+        self.helper
+            .prepare_input_outputs(&input_topcis_set, &output_topcis_set)
             .unwrap();
+
+        let num_partitions = self.helper.ensure_copartitioned().unwrap();
 
         for partition in 0..num_partitions {
             let partitioned_topics: Vec<(_, Box<dyn GenericInput<TState, TExtraState>>)> = self
