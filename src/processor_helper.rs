@@ -234,21 +234,39 @@ impl KafkaProcessorImplementor for KafkaProcessorHelper {
     }
 }
 
-#[derive(Clone)]
 pub struct TopicTestHelper {
-    ch: tokio::sync::broadcast::Sender<OwnedMessage>,
+    ch_tx: tokio::sync::broadcast::Sender<OwnedMessage>,
+    ch_rx: tokio::sync::broadcast::Receiver<OwnedMessage>,
     sent: Arc<AtomicU32>,
     recv: Arc<AtomicU32>,
+    input: bool,
+    output: bool,
+}
+
+impl Clone for TopicTestHelper {
+    fn clone(&self) -> Self {
+        Self {
+            ch_tx: self.ch_tx.clone(),
+            ch_rx: self.ch_tx.subscribe(),
+            sent: self.sent.clone(),
+            recv: self.recv.clone(),
+            input: self.input.clone(),
+            output: self.output.clone(),
+        }
+    }
 }
 
 impl Default for TopicTestHelper {
     fn default() -> Self {
-        let (tx, _rx) = tokio::sync::broadcast::channel(1_000_000);
+        let (tx, rx) = tokio::sync::broadcast::channel(1_000_000);
 
         Self {
-            ch: tx,
+            ch_tx: tx,
+            ch_rx: rx,
             sent: Default::default(),
             recv: Default::default(),
+            input: false,
+            output: false,
         }
     }
 }
@@ -259,10 +277,14 @@ pub struct TestsProcessorHelper {
 }
 
 impl TestsProcessorHelper {
-    pub fn new() -> Self {
-        Self {
-            topics: HashMap::new(),
+    pub fn new(topics: Vec<&str>) -> Self {
+        let mut m = HashMap::new();
+        for topic in topics {
+            m.entry(topic.to_string())
+                .or_insert(TopicTestHelper::default());
         }
+
+        Self { topics: m }
     }
 }
 
@@ -272,24 +294,18 @@ impl TestsProcessorHelper {
         F: Decoder,
         T: Serialize,
     {
-        let input = self
-            .topics
-            .entry(topic.to_string())
-            .or_insert(TopicTestHelper::default());
-
-        Sender::new(topic, decoder, input.ch.clone(), input.sent.clone())
+        let input = self.topics.get_mut(&topic).unwrap();
+        input.input = true;
+        Sender::new(topic, decoder, input.ch_tx.clone(), input.sent.clone())
     }
 
     pub fn output<E, T>(&mut self, topic: String, encoder: E) -> Receiver<T, E>
     where
         E: Encoder<In = T>,
     {
-        let output = self
-            .topics
-            .entry(topic.to_string())
-            .or_insert(TopicTestHelper::default());
-
-        Receiver::new(encoder, output.ch.subscribe())
+        let output = self.topics.get_mut(&topic).unwrap();
+        output.output = true;
+        Receiver::new(encoder, output.ch_tx.subscribe())
     }
 }
 
@@ -300,21 +316,9 @@ impl KafkaProcessorImplementor for TestsProcessorHelper {
 
     fn validate_inputs_outputs(
         &mut self,
-        input_topics: &HashSet<String>,
-        output_topics: &HashSet<String>,
+        _input_topics: &HashSet<String>,
+        _output_topics: &HashSet<String>,
     ) -> Result<usize, ()> {
-        for topic in input_topics {
-            self.topics
-                .entry(topic.to_string())
-                .or_insert(TopicTestHelper::default());
-        }
-
-        for topic in output_topics {
-            self.topics
-                .entry(topic.to_string())
-                .or_insert(TopicTestHelper::default());
-        }
-
         Ok(1)
     }
 
@@ -323,7 +327,7 @@ impl KafkaProcessorImplementor for TestsProcessorHelper {
         topic_name: &str,
         _partition: u16,
     ) -> Self::OwnedStreamableType {
-        BroadcastStream::new(self.topics.get(topic_name).unwrap().ch.subscribe())
+        BroadcastStream::new(self.topics.get(topic_name).unwrap().ch_tx.subscribe())
     }
 
     fn send_result<'a, K, P>(
@@ -350,7 +354,12 @@ impl KafkaProcessorImplementor for TestsProcessorHelper {
             .sent
             .fetch_add(1, Ordering::Relaxed);
 
-        self.topics.get(record.topic).unwrap().ch.send(msg).unwrap();
+        self.topics
+            .get(record.topic)
+            .unwrap()
+            .ch_tx
+            .send(msg)
+            .unwrap();
         Ok(Box::pin(async move { () }))
     }
 
@@ -369,13 +378,20 @@ impl KafkaProcessorImplementor for TestsProcessorHelper {
         _topics: &HashSet<String>,
     ) -> tokio::task::JoinHandle<Result<(), String>> {
         let task = tokio::spawn(async move {
-            // while let Some(_) = select_all.next().await {}
+            // TODO: This is ugly and we can implement better "wait" mechanism
+            // TODO: Support output topics where we don't receive every message, only if it's inputs
             loop {
-                if self.topics.iter().all(|(_t, stats)| {
-                    let r = stats.recv.load(Ordering::Relaxed);
-                    let s = stats.sent.load(Ordering::Relaxed);
-                    s == r
-                }) {
+                if self
+                    .topics
+                    .iter()
+                    .filter(|(_, t)| t.input)
+                    .all(|(_t, stats)| {
+                        // println!("{:?}", _t);
+                        let r = stats.recv.load(Ordering::Relaxed);
+                        let s = stats.sent.load(Ordering::Relaxed);
+                        s == r
+                    })
+                {
                     break;
                 }
                 sleep(Duration::from_nanos(0)).await;

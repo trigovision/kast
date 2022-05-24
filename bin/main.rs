@@ -96,7 +96,7 @@ mod tests {
     #[rstest]
     #[tokio::test]
     async fn test_single_store() {
-        let mut t = TestsProcessorHelper::new();
+        let mut t = TestsProcessorHelper::new(vec!["c1", "c2", "c3"]);
         let state_store = Arc::new(RwLock::new(HashMap::new()));
         let state_store_clone = state_store.clone();
         let mut in1 = t.input("c1".to_string(), JsonDecoder::new());
@@ -108,7 +108,7 @@ mod tests {
                 Input::new("c1".to_string(), json_encoder, handle_clicks_stateless),
                 Input::new("c2".to_string(), JsonEncoder::new(), emit_clicks_stateful),
             ],
-            vec![Output::new("c1".to_string())], //TODO: This will still work if this line is removed because we have input with the same topic
+            vec![Output::new("c1".to_string())],
             move || state_store_clone.clone(),
             || (),
         );

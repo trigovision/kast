@@ -73,7 +73,7 @@ where
                 .map(|(topic_name, input_handler)| {
                     (
                         self.helper
-                            .create_partitioned_consumer(topic_name, partition as u16), //TODO: Does it work with multiple consumer?
+                            .create_partitioned_consumer(topic_name, partition as u16), //TODO: Does it work with multiple consumers?
                         input_handler.clone(),
                     )
                 })
@@ -83,6 +83,7 @@ where
             let gen2 = self.extra_state_gen.clone();
 
             let helper = self.helper.clone();
+            let output_topcis_set = output_topcis_set.clone();
             tokio::spawn(async move {
                 let mut state_store = gen();
                 let mut extra_state = gen2();
@@ -103,6 +104,7 @@ where
                     let mut ctx = Context::new(key, state);
 
                     h.handle(&mut extra_state, &mut ctx, msg.payload()).await;
+
                     if let Some(state) = &ctx.get_new_state() {
                         state_store.set(key.to_string(), state.clone()).await;
                     }
@@ -115,7 +117,9 @@ where
                     // NOTE: It is extremly important that this will happen here and not inside the spawn to gurantee order of msgs!
                     let helper_clone = helper.clone();
 
+                    let output_topcis_set = output_topcis_set.clone();
                     let sends = ctx.to_send().into_iter().map(move |s| {
+                        assert!(output_topcis_set.contains(&s.topic.to_string())); //TODO: Should we remove this assertion?
                         helper_clone
                             .send_result(FutureRecord::to(&s.topic).key(&s.key).payload(&s.payload))
                             .unwrap()
