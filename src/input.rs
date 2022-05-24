@@ -58,7 +58,7 @@ where
 
     async fn handle(&self, state: &mut S, ctx: &mut Context<T>, data: Option<&[u8]>) {
         let msg = self.encoder.encode(data);
-        self.callback.call(state, ctx, msg.clone()).await;
+        self.callback.call(state, ctx, msg).await;
     }
 }
 

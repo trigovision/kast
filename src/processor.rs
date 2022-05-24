@@ -1,14 +1,19 @@
 use std::{
     collections::{HashMap, HashSet},
     marker::PhantomData,
+    sync::Arc,
 };
 
 use futures::{future::join_all, stream::select_all, StreamExt};
 use rdkafka::{producer::FutureRecord, Message};
+use tokio::sync::Barrier;
 
 use crate::{
-    context::Context, input::GenericInput, output::Output,
-    processor_helper::KafkaProcessorImplementor, state_store::StateStore,
+    context::Context,
+    input::GenericInput,
+    output::Output,
+    processor_helper::{KafkaProcessorImplementor, PartitionHelper},
+    state_store::StateStore,
 };
 
 pub struct Processor<TState, TExtraState, TStore, F1, F2, H> {
@@ -29,7 +34,8 @@ where
     TExtraState: Send + 'static,
     //TODO: Refine the constraints?
     H: KafkaProcessorImplementor + Sync + 'static,
-    <H::DeliveryFutureType as futures::Future>::Output: Send,
+    // <H::DeliveryFutureType as futures::Future>::Output: Send,
+    <<<H as KafkaProcessorImplementor>::PartitionHelperType as PartitionHelper>::DeliveryFutureType as futures::Future>::Output: std::marker::Send
 {
     pub fn new(
         helper: H,
@@ -68,34 +74,30 @@ where
 
         let num_partitions = self.helper.ensure_copartitioned().unwrap();
 
+        let b = Arc::new(Barrier::new(num_partitions + 1)); //TODO: Change barrier to something else?
         for partition in 0..num_partitions {
-            let partitioned_topics: Vec<(_, Box<dyn GenericInput<TState, TExtraState>>)> = self
+            let partitioned_topics: Vec<Box<dyn GenericInput<TState, TExtraState>>> = self
                 .inputs
                 .iter()
-                .map(|(topic_name, input_handler)| {
-                    (
-                        self.helper
-                            .create_partitioned_consumer(topic_name, partition as u16), //TODO: Does it work with multiple consumers?
-                        input_handler.clone(),
-                    )
-                })
+                .map(|(_, input_handler)| input_handler.clone())
                 .collect();
 
             let gen = self.state_store_gen.clone();
             let gen2 = self.extra_state_gen.clone();
 
-            let helper = self.helper.clone();
             let output_topcis_set = output_topcis_set.clone();
+            let partition_handler = self.helper.create_partitioned_consumer(partition as i32);
+            let b_clone = b.clone();
             tokio::spawn(async move {
                 let mut state_store = gen();
                 let mut extra_state = gen2();
-
-                let iter = partitioned_topics
-                    .into_iter()
-                    .map(|(a, h)| Box::pin(a).map(move |msg| (h.clone(), msg)));
+                let iter = partitioned_topics.into_iter().map(|h| {
+                    Box::pin(partition_handler.create_partitioned_topic_stream(&h.topic()))
+                    .map(move |msg| (h.clone(), msg))
+                });
 
                 let mut select_all = select_all(iter);
-
+                b_clone.wait().await;
                 while let Some((h, msg)) = select_all.next().await {
                     let msg = msg.unwrap();
 
@@ -117,7 +119,9 @@ where
                     let msg_offset = msg.offset();
 
                     // NOTE: It is extremly important that this will happen here and not inside the spawn to gurantee order of msgs!
-                    let helper_clone = helper.clone();
+                    let helper_clone = partition_handler.clone();
+
+
 
                     let output_topcis_set = output_topcis_set.clone();
                     let sends = ctx.to_send().into_iter().map(move |s| {
@@ -127,7 +131,9 @@ where
                             .unwrap()
                     });
 
-                    let helper_clone = helper.clone();
+
+
+                    let helper_clone = partition_handler.clone();
                     tokio::spawn(async move {
                         join_all(sends).await;
                         helper_clone
@@ -137,6 +143,7 @@ where
                 }
             });
         }
+        b.wait().await;
     }
 
     // TODO: Can we move it back to run and support something to notify initialization?

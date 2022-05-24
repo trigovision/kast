@@ -52,30 +52,15 @@ impl Stream for ShittyKafkaShit {
     }
 }
 
-pub trait KafkaProcessorImplementor: Send + Clone
-where
-    <Self::DeliveryFutureType as futures::Future>::Output: Send,
-{
+pub trait PartitionHelper: Send + Clone {
+    type DeliveryFutureType: futures::Future + Send;
     type Error: Debug + Send;
     type OwnedStreamableType: Stream<Item = Result<OwnedMessage, Self::Error>>
         + Send
         + Sync
         + 'static;
-    type DeliveryFutureType: futures::Future + Send;
 
-    fn prepare_input_outputs(
-        &mut self,
-        input_topics: &HashSet<String>,
-        output_topics: &HashSet<String>,
-    ) -> Result<(), ()>;
-
-    fn ensure_copartitioned(&mut self) -> Result<usize, ()>;
-
-    fn create_partitioned_consumer(
-        &self,
-        topic_name: &str,
-        partition: u16,
-    ) -> Self::OwnedStreamableType;
+    fn create_partitioned_topic_stream(&self, topic_name: &str) -> Self::OwnedStreamableType;
 
     fn send_result<'a, K, P>(
         &self,
@@ -86,6 +71,20 @@ where
         P: ToBytes + ?Sized;
 
     fn store_offset(&self, topic: &str, partition: i32, offset: i64) -> KafkaResult<()>;
+}
+
+pub trait KafkaProcessorImplementor: Send {
+    type PartitionHelperType: PartitionHelper + Sync;
+
+    fn prepare_input_outputs(
+        &mut self,
+        input_topics: &HashSet<String>,
+        output_topics: &HashSet<String>,
+    ) -> Result<(), ()>;
+
+    fn ensure_copartitioned(&mut self) -> Result<usize, ()>;
+
+    fn create_partitioned_consumer(&self, partition: i32) -> Self::PartitionHelperType;
 
     fn wait_to_finish(
         self,
@@ -93,26 +92,6 @@ where
     ) -> tokio::task::JoinHandle<Result<(), String>>;
 }
 
-// pub trait PartitionedProcessorHelper: Send
-// where
-//     <Self::DeliveryFutureType as futures::Future>::Output: Send,
-// {
-//     type DeliveryFutureType: futures::Future + Send;
-
-//     fn send_result<'a, K, P>(
-//         &self,
-//         record: FutureRecord<'a, K, P>,
-//     ) -> Result<Self::DeliveryFutureType, (KafkaError, FutureRecord<'a, K, P>)>
-//     where
-//         K: ToBytes + ?Sized,
-//         P: ToBytes + ?Sized;
-
-//     fn store_offset(&self, topic: &str, partition: i32, offset: i64) -> KafkaResult<()>;
-
-//     fn notify_partition_handler_done(&self, partition: i32);
-// }
-
-#[derive(Clone)]
 pub struct KafkaProcessorHelper {
     pub(crate) stream_consumer: Arc<StreamConsumer>,
     future_producer: FutureProducer,
@@ -161,29 +140,23 @@ impl KafkaProcessorHelper {
         }
     }
 }
+#[derive(Clone)]
+pub struct KafkaPartitionProcessor {
+    partition: i32,
+    future_producer: FutureProducer,
+    pub(crate) stream_consumer: Arc<StreamConsumer>,
+}
 
-impl KafkaProcessorImplementor for KafkaProcessorHelper {
+impl PartitionHelper for KafkaPartitionProcessor {
+    type DeliveryFutureType = DeliveryFuture;
     type Error = KafkaError;
     type OwnedStreamableType = ShittyKafkaShit;
-    type DeliveryFutureType = DeliveryFuture;
 
-    fn prepare_input_outputs(
-        &mut self,
-        input_topics: &HashSet<String>,
-        _output_topics: &HashSet<String>,
-    ) -> Result<(), ()> {
-        Ok(())
-    }
-
-    fn create_partitioned_consumer(
-        &self,
-        topic_name: &str,
-        partition: u16,
-    ) -> Self::OwnedStreamableType {
+    fn create_partitioned_topic_stream(&self, topic_name: &str) -> Self::OwnedStreamableType {
         let bla = self
             .stream_consumer
             .clone()
-            .split_partition_queue(topic_name, partition as i32)
+            .split_partition_queue(topic_name, self.partition)
             .unwrap();
 
         ShittyKafkaShit::new(bla)
@@ -202,6 +175,26 @@ impl KafkaProcessorImplementor for KafkaProcessorHelper {
 
     fn store_offset(&self, topic: &str, partition: i32, offset: i64) -> KafkaResult<()> {
         self.stream_consumer.store_offset(topic, partition, offset)
+    }
+}
+
+impl KafkaProcessorImplementor for KafkaProcessorHelper {
+    type PartitionHelperType = KafkaPartitionProcessor;
+
+    fn prepare_input_outputs(
+        &mut self,
+        _input_topics: &HashSet<String>,
+        _output_topics: &HashSet<String>,
+    ) -> Result<(), ()> {
+        Ok(())
+    }
+
+    fn create_partitioned_consumer(&self, partition: i32) -> KafkaPartitionProcessor {
+        KafkaPartitionProcessor {
+            partition,
+            future_producer: self.future_producer.clone(),
+            stream_consumer: self.stream_consumer.clone(),
+        }
     }
 
     fn wait_to_finish(
@@ -244,18 +237,20 @@ impl KafkaProcessorImplementor for KafkaProcessorHelper {
 
 pub struct TopicTestHelper {
     ch_tx: tokio::sync::broadcast::Sender<OwnedMessage>,
-    ch_rx: tokio::sync::broadcast::Receiver<OwnedMessage>,
     sent: Arc<AtomicU32>,
     recv: Arc<AtomicU32>,
     input: bool,
     output: bool,
+    // Note: we store _ch_rx so sends to a channel which isn't input
+    // Wont panic when there are no subscribers
+    _ch_rx: tokio::sync::broadcast::Receiver<OwnedMessage>,
 }
 
 impl Clone for TopicTestHelper {
     fn clone(&self) -> Self {
         Self {
             ch_tx: self.ch_tx.clone(),
-            ch_rx: self.ch_tx.subscribe(),
+            _ch_rx: self.ch_tx.subscribe(),
             sent: self.sent.clone(),
             recv: self.recv.clone(),
             input: self.input.clone(),
@@ -270,7 +265,7 @@ impl Default for TopicTestHelper {
 
         Self {
             ch_tx: tx,
-            ch_rx: rx,
+            _ch_rx: rx,
             sent: Default::default(),
             recv: Default::default(),
             input: false,
@@ -279,7 +274,6 @@ impl Default for TopicTestHelper {
     }
 }
 
-#[derive(Clone)]
 pub struct TestsProcessorHelper {
     topics: HashMap<String, TopicTestHelper>,
 }
@@ -303,7 +297,6 @@ impl TestsProcessorHelper {
         T: Serialize,
     {
         let input = self.topics.get_mut(&topic).unwrap();
-        input.input = true;
         Sender::new(topic, decoder, input.ch_tx.clone(), input.sent.clone())
     }
 
@@ -312,39 +305,23 @@ impl TestsProcessorHelper {
         E: Encoder<In = T>,
     {
         let output = self.topics.get_mut(&topic).unwrap();
-        output.output = true;
         Receiver::new(encoder, output.ch_tx.subscribe())
     }
 }
 
-impl KafkaProcessorImplementor for TestsProcessorHelper {
+#[derive(Clone)]
+pub struct TestsPartitionProcessor {
+    topics: HashMap<String, TopicTestHelper>,
+}
+
+impl PartitionHelper for TestsPartitionProcessor {
+    type DeliveryFutureType = Pin<Box<dyn futures::Future<Output = ()> + Send>>;
     type Error = BroadcastStreamRecvError;
     type OwnedStreamableType = BroadcastStream<OwnedMessage>;
-    type DeliveryFutureType = Pin<Box<dyn futures::Future<Output = ()> + Send>>;
 
-    fn prepare_input_outputs(
-        &mut self,
-        input_topics: &HashSet<String>,
-        output_topics: &HashSet<String>,
-    ) -> Result<(), ()> {
-        for (k, v) in self.topics.iter_mut() {
-            if input_topics.contains(k) {
-                v.input = true;
-            }
-
-            if output_topics.contains(k) {
-                v.output = true;
-            }
-        }
-        Ok(())
-    }
-
-    fn create_partitioned_consumer(
-        &self,
-        topic_name: &str,
-        _partition: u16,
-    ) -> Self::OwnedStreamableType {
-        BroadcastStream::new(self.topics.get(topic_name).unwrap().ch_tx.subscribe())
+    fn create_partitioned_topic_stream(&self, topic_name: &str) -> Self::OwnedStreamableType {
+        let rec = self.topics.get(topic_name).unwrap();
+        BroadcastStream::new(rec.ch_tx.subscribe())
     }
 
     fn send_result<'a, K, P>(
@@ -380,6 +357,33 @@ impl KafkaProcessorImplementor for TestsProcessorHelper {
 
         Ok(())
     }
+}
+
+impl KafkaProcessorImplementor for TestsProcessorHelper {
+    type PartitionHelperType = TestsPartitionProcessor;
+
+    fn prepare_input_outputs(
+        &mut self,
+        input_topics: &HashSet<String>,
+        output_topics: &HashSet<String>,
+    ) -> Result<(), ()> {
+        for (k, v) in self.topics.iter_mut() {
+            if input_topics.contains(k) {
+                v.input = true;
+            }
+
+            if output_topics.contains(k) {
+                v.output = true;
+            }
+        }
+        Ok(())
+    }
+
+    fn create_partitioned_consumer(&self, _partition: i32) -> TestsPartitionProcessor {
+        TestsPartitionProcessor {
+            topics: self.topics.clone(),
+        }
+    }
 
     fn wait_to_finish(
         self,
@@ -394,9 +398,9 @@ impl KafkaProcessorImplementor for TestsProcessorHelper {
                     .iter()
                     .filter(|(_, t)| t.input)
                     .all(|(_t, stats)| {
-                        // println!("{:?}", _t);
                         let r = stats.recv.load(Ordering::Relaxed);
                         let s = stats.sent.load(Ordering::Relaxed);
+
                         s == r
                     })
                 {
@@ -461,6 +465,7 @@ where
         );
 
         self.sem.fetch_add(1, Ordering::Relaxed);
+
         self.tx.send(msg)
     }
 }
