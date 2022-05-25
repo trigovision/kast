@@ -37,7 +37,7 @@ where
     }
 
     pub fn get_new_state(&self) -> &Option<T> {
-        &self.origingal_state
+        &self.new_state
     }
 
     pub fn set_state(&mut self, state: Option<T>) {

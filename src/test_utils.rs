@@ -139,7 +139,6 @@ where
                 .map(|(t, (_o, (tx, _rx)))| (t.to_string(), tx.clone()))
                 .collect();
 
-            // println!("@ {}", sends.len());
             for s in ctx.to_send() {
                 let msg = OwnedMessage::new(
                     Some(s.payload),
