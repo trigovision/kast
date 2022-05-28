@@ -43,7 +43,7 @@ pub trait PartitionHelper: Send + Clone {
         K: ToBytes + ?Sized,
         P: ToBytes + ?Sized;
 
-    fn store_offset(&self, topic: &str, partition: i32, offset: i64) -> KafkaResult<()>;
+    fn store_offset(&mut self, topic: &str, offset: i64) -> KafkaResult<()>;
 }
 
 pub trait KafkaProcessorImplementor: Send {
@@ -91,15 +91,9 @@ impl PartitionHelper for KafkaPartitionProcessor {
     type OwnedStreamableType = StreamPartitionQueue<DefaultConsumerContext>;
 
     fn create_partitioned_topic_stream(&self, topic_name: &str) -> Self::OwnedStreamableType {
-        let partition_queue = self
-            .stream_consumer
+        self.stream_consumer
             .split_partition_queue(topic_name, self.partition)
-            .unwrap();
-
-        // self.stream_consumer.spl
-        // let bla = partition_queue.stream().map_ok(|m| m.detach());
-        // bla.boxed()
-        partition_queue
+            .unwrap()
     }
 
     fn send_result<'a, K, P>(
@@ -113,8 +107,9 @@ impl PartitionHelper for KafkaPartitionProcessor {
         self.future_producer.send_result(record)
     }
 
-    fn store_offset(&self, topic: &str, partition: i32, offset: i64) -> KafkaResult<()> {
-        self.stream_consumer.store_offset(topic, partition, offset)
+    fn store_offset(&mut self, topic: &str, offset: i64) -> KafkaResult<()> {
+        self.stream_consumer
+            .store_offset(topic, self.partition, offset)
     }
 }
 

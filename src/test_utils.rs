@@ -143,7 +143,7 @@ impl PartitionHelper for TestsPartitionProcessor {
         Ok(Box::pin(async move { () }))
     }
 
-    fn store_offset(&self, topic: &str, _partition: i32, _offset: i64) -> KafkaResult<()> {
+    fn store_offset(&mut self, topic: &str, _offset: i64) -> KafkaResult<()> {
         self.topics
             .get(topic)
             .unwrap()

@@ -49,7 +49,7 @@ async fn main() {
     let settings = ClientConfig::new()
         .set("bootstrap.servers", "localhost:9092")
         .set("partitioner", "murmur2")
-        .set("group.id", "keypoints111")
+        .set("group.id", "keypoints444")
         .set("heartbeat.interval.ms", "250")
         .set("enable.auto.commit", "true")
         // This is important so offset won't be store automatically

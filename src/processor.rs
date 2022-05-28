@@ -6,13 +6,13 @@ use std::{
 
 use futures::{future::join_all, stream::select_all, StreamExt};
 use rdkafka::{producer::FutureRecord, Message};
-use tokio::sync::Barrier;
+use tokio::sync::{Barrier, Mutex};
 
 use crate::{
     context::Context,
     input::GenericInput,
     output::Output,
-    processor_helper::{KafkaProcessorImplementor, PartitionHelper, IntoKafkaStream},
+    processor_helper::{IntoKafkaStream, KafkaProcessorImplementor, PartitionHelper},
     state_store::StateStore,
 };
 
@@ -69,32 +69,31 @@ where
         let num_partitions = self.helper.ensure_copartitioned().unwrap();
 
         let partitions_barrier = Arc::new(Barrier::new(num_partitions + 1));
-        for partition in 0..num_partitions {
+        for partition in 0..num_partitions as i32 {
             let inputs = self.inputs.clone();               
-
-            let gen = self.state_store_gen.clone();
-            let gen2 = self.extra_state_gen.clone();
-
             let output_topcis_set = output_topcis_set.clone();
             let partition_handler = self.helper.create_partitioned_consumer(partition as i32);
-            let b_clone = partitions_barrier.clone();
-            
+            let partitions_barrier_clone = partitions_barrier.clone();
+            let gen = self.state_store_gen.clone();
+            let gen2 = self.extra_state_gen.clone();
             tokio::spawn(async move {
                 let mut state_store = gen();
                 let mut extra_state = gen2();
-                // let iter = ;
-                // let bla = iter.map(|handle| Box::pin(handle.stream()));
-                let bla: Vec<_> = inputs.keys().into_iter().map(|topic| {
+                let stream_gens: Vec<_> = inputs.keys().into_iter().map(|topic| {
                     partition_handler.create_partitioned_topic_stream(&topic)
-                    // .map(move |msg| (topic, msg))
-                }).collect();
-                let mut streams = select_all(bla.iter().map(|h|Box::pin(h.stream())));
+                }).collect(); 
+                let mut topic_partition_offset_locks = HashMap::new();
+                let mut streams = select_all(
+                    stream_gens.iter().map(|h| 
+                        h.stream()
+                    )
+                );
 
-                b_clone.wait().await;
+                partitions_barrier_clone.wait().await;
                 while let Some(msg) = streams.next().await {
                     let msg = msg.unwrap();
-                    println!("{:?}", msg);
-
+                    assert_eq!(msg.partition(), partition);
+                    
                     //TODO: Key serializer?
                     let key = std::str::from_utf8(msg.key().unwrap()).unwrap();
 
@@ -110,26 +109,31 @@ where
 
                     // let stream_consumer = stream_consumer.clone();
                     let msg_topic = msg.topic().to_string();
-                    let msg_partition = msg.partition();
                     let msg_offset = msg.offset();
 
-                    // NOTE: It is extremly important that this will happen here and not inside the spawn to gurantee order of msgs!
                     let helper_clone = partition_handler.clone();
-
                     let output_topcis_set = output_topcis_set.clone();
                     let sends = ctx.to_send().into_iter().map(move |s| {
                         assert!(output_topcis_set.contains(&s.topic.to_string())); //TODO: Should we remove this assertion?
                         helper_clone
                             .send_result(FutureRecord::to(&s.topic).key(&s.key).payload(&s.payload))
                             .unwrap()
-                    });
+                    }); 
 
-                    let helper_clone = partition_handler.clone();
+                    let mut helper_clone = partition_handler.clone();
+                    let offset_lock_for_partitioned_topic = topic_partition_offset_locks.entry(msg_topic.clone()).or_insert(Arc::new(Mutex::new(msg_offset))).clone();  
                     tokio::spawn(async move {
                         join_all(sends).await;
-                        helper_clone
-                            .store_offset(&msg_topic, msg_partition, msg_offset)
+
+                        // Note: the lock is required because the store offset func assumes that the offsets
+                        // Are monotonically increasing, otherwise the commit interval can commit an older offset
+                        let mut lock = offset_lock_for_partitioned_topic.lock().await;
+                        if msg_offset > *lock {
+                            *lock = msg_offset;
+                            helper_clone
+                            .store_offset(&msg_topic, *lock)
                             .unwrap();
+                        }
                     });
                 }
             });
