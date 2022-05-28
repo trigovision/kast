@@ -1,162 +1,210 @@
-use std::{collections::HashMap, marker::PhantomData, sync::Arc};
-
-use futures::{
-    channel::mpsc::{SendError, UnboundedReceiver, UnboundedSender},
-    stream::SelectAll,
-    SinkExt, StreamExt,
+use std::{
+    collections::{HashMap, HashSet},
+    marker::PhantomData,
+    pin::Pin,
+    sync::{
+        atomic::{AtomicU32, Ordering},
+        Arc,
+    },
+    time::Duration,
 };
-use rdkafka::{message::OwnedMessage, Message};
+
+use futures::{Stream, StreamExt};
+use rdkafka::{
+    error::{KafkaError, KafkaResult},
+    message::{OwnedMessage, ToBytes},
+    producer::FutureRecord,
+    Message,
+};
 use serde::Serialize;
-use tokio::sync::RwLock;
+use tokio::{sync::broadcast::error::SendError, time::sleep};
+use tokio_stream::wrappers::{errors::BroadcastStreamRecvError, BroadcastStream};
 
-use crate::{
-    context::Context,
-    encoders::{Decoder, Encoder},
-    input::GenericInput,
-    output::Output,
-    state_store::StateStore,
-};
-
-pub struct TestProcessor<TState, TExtraState, TStore, F1, F2> {
-    pub inputs: HashMap<
-        String,
-        (
-            Box<dyn GenericInput<TState, TExtraState>>,
-            (
-                UnboundedSender<OwnedMessage>,
-                UnboundedReceiver<OwnedMessage>,
-            ),
-        ),
-    >,
-    outputs: HashMap<
-        String,
-        (
-            Output,
-            (
-                UnboundedSender<OwnedMessage>,
-                Arc<RwLock<UnboundedReceiver<OwnedMessage>>>,
-            ),
-        ),
-    >,
-    // pub input_channels: HashMap<String, UnboundedReceiver<Vec<u8>>>,
-    state_store_gen: F1,
-    extra_state_gen: F2,
-    _marker: PhantomData<(TState, TStore)>,
+pub struct TopicTestHelper {
+    ch_tx: tokio::sync::broadcast::Sender<OwnedMessage>,
+    sent: Arc<AtomicU32>,
+    recv: Arc<AtomicU32>,
+    input: bool,
+    // Note: we store _ch_rx so sends to a channel which isn't input
+    // Wont panic when there are no subscribers
+    _ch_rx: tokio::sync::broadcast::Receiver<OwnedMessage>,
 }
 
-impl<TState, TExtraState, TStore, F1, F2> TestProcessor<TState, TExtraState, TStore, F1, F2>
-where
-    TState: Clone + Send + Sync + 'static,
-    TStore: StateStore<String, TState> + Send + Sync,
-    F1: FnOnce() -> TStore + Copy + Send + 'static,
-    F2: FnOnce() -> TExtraState + Copy + Send + 'static,
-    TExtraState: Send + 'static,
-    // T: Seri
-{
-    pub fn new(
-        inputs: Vec<Box<dyn GenericInput<TState, TExtraState>>>,
-        outputs: Vec<Output>,
-        state_store_gen: F1,
-        extra_state_gen: F2,
-    ) -> Self {
-        let inputs = inputs
-            .into_iter()
-            .map(|input| (input.topic(), (input, futures::channel::mpsc::unbounded())))
-            .collect();
-
-        let outputs = outputs
-            .into_iter()
-            .map(|out| {
-                let (tx, rx) = futures::channel::mpsc::unbounded();
-                (
-                    out.topic().to_string(),
-                    (out, (tx, Arc::new(RwLock::new(rx)))),
-                )
-            })
-            .collect();
-
-        TestProcessor {
-            inputs,
-            outputs,
-            state_store_gen,
-            extra_state_gen,
-            _marker: PhantomData,
+impl Clone for TopicTestHelper {
+    fn clone(&self) -> Self {
+        Self {
+            ch_tx: self.ch_tx.clone(),
+            _ch_rx: self.ch_tx.subscribe(),
+            sent: self.sent.clone(),
+            recv: self.recv.clone(),
+            input: self.input.clone(),
         }
     }
+}
 
+impl Default for TopicTestHelper {
+    fn default() -> Self {
+        let (tx, rx) = tokio::sync::broadcast::channel(1_000_000);
+
+        Self {
+            ch_tx: tx,
+            _ch_rx: rx,
+            sent: Default::default(),
+            recv: Default::default(),
+            input: false,
+        }
+    }
+}
+
+pub struct TestsProcessorHelper {
+    topics: HashMap<String, TopicTestHelper>,
+}
+
+impl TestsProcessorHelper {
+    pub fn new(topics: Vec<&str>) -> Self {
+        let mut m = HashMap::new();
+        for topic in topics {
+            m.entry(topic.to_string())
+                .or_insert(TopicTestHelper::default());
+        }
+
+        Self { topics: m }
+    }
+}
+
+impl TestsProcessorHelper {
     pub fn input<F, T>(&mut self, topic: String, decoder: F) -> Sender<T, F>
     where
         F: Decoder,
         T: Serialize,
     {
-        Sender::new(decoder, self.inputs.get(&topic).unwrap().1 .0.clone())
+        let input = self.topics.get_mut(&topic).unwrap();
+        Sender::new(topic, decoder, input.ch_tx.clone(), input.sent.clone())
     }
 
     pub fn output<E, T>(&mut self, topic: String, encoder: E) -> Receiver<T, E>
     where
         E: Encoder<In = T>,
     {
-        Receiver::new(encoder, self.outputs.get(&topic).unwrap().1 .1.clone())
+        let output = self.topics.get_mut(&topic).unwrap();
+        Receiver::new(encoder, output.ch_tx.subscribe())
+    }
+}
+
+#[derive(Clone)]
+pub struct TestsPartitionProcessor {
+    topics: HashMap<String, TopicTestHelper>,
+}
+
+impl IntoKafkaStream for tokio::sync::broadcast::Sender<OwnedMessage> {
+    type Error = BroadcastStreamRecvError;
+
+    fn stream<'a>(
+        &'a self,
+    ) -> Pin<Box<dyn Stream<Item = Result<OwnedMessage, Self::Error>> + Send + 'a>> {
+        BroadcastStream::new(self.subscribe()).boxed()
+    }
+}
+
+impl PartitionHelper for TestsPartitionProcessor {
+    type DeliveryFutureType = Pin<Box<dyn futures::Future<Output = ()> + Send>>;
+    type Error = BroadcastStreamRecvError;
+    type OwnedStreamableType = tokio::sync::broadcast::Sender<OwnedMessage>;
+
+    fn create_partitioned_topic_stream<'a>(
+        &'a self,
+        topic_name: &str,
+    ) -> tokio::sync::broadcast::Sender<OwnedMessage> {
+        let rec = self.topics.get(topic_name).unwrap();
+        rec.ch_tx.clone()
     }
 
-    pub async fn run(self) {
-        let gen = self.state_store_gen.clone();
-        let gen2 = self.extra_state_gen.clone();
-
-        // tokio::spawn(async move {
-        let mut state_store = gen();
-        let mut extra_state = gen2();
-
-        let tx_hashmap_from_out_to_in: HashMap<String, UnboundedSender<OwnedMessage>> = self
-            .inputs
-            .iter()
-            .map(|(t, (_a, (tx, _rx)))| (t.to_string(), tx.clone()))
-            .collect();
-
-        let mut select_all = SelectAll::from_iter(
-            self.inputs
-                .into_iter()
-                .map(|(_topic, h)| (h.0, h.1 .1))
-                .map(|(handler, receiver)| receiver.map(move |msg| (handler.clone(), msg))),
+    fn send_result<'a, K, P>(
+        &self,
+        record: FutureRecord<'a, K, P>,
+    ) -> Result<Self::DeliveryFutureType, (KafkaError, FutureRecord<'a, K, P>)>
+    where
+        K: ToBytes + ?Sized,
+        P: ToBytes + ?Sized,
+    {
+        let msg = OwnedMessage::new(
+            record.payload.map(|p| p.to_bytes().to_vec()),
+            record.key.map(|k| k.to_bytes().to_vec()),
+            record.topic.to_string(),
+            rdkafka::Timestamp::NotAvailable,
+            0,
+            0,
+            None,
         );
 
-        while let Some((h, msg)) = select_all.next().await {
-            //TODO: Key serializer?
+        let rec = self.topics.get(record.topic).unwrap();
+        rec.sent.fetch_add(1, Ordering::Relaxed);
+        rec.ch_tx.send(msg).unwrap();
+        Ok(Box::pin(async move { () }))
+    }
 
-            let key = std::str::from_utf8(msg.key().unwrap()).unwrap();
+    fn store_offset(&self, topic: &str, _partition: i32, _offset: i64) -> KafkaResult<()> {
+        self.topics
+            .get(topic)
+            .unwrap()
+            .recv
+            .fetch_add(1, Ordering::Relaxed);
 
-            let state = state_store.get(key).await.map(|s| s.clone());
-            let mut ctx = Context::new(key, state);
+        Ok(())
+    }
+}
 
-            h.handle(&mut extra_state, &mut ctx, msg.payload()).await;
-            if let Some(state) = &ctx.get_state() {
-                state_store.set(key.to_string(), state.clone()).await;
-            }
+use crate::{
+    encoders::{Decoder, Encoder},
+    processor_helper::{IntoKafkaStream, KafkaProcessorImplementor, PartitionHelper},
+};
+impl KafkaProcessorImplementor for TestsProcessorHelper {
+    type PartitionHelperType = TestsPartitionProcessor;
 
-            let producer: HashMap<String, UnboundedSender<OwnedMessage>> = self
-                .outputs
-                .iter()
-                .map(|(t, (_o, (tx, _rx)))| (t.to_string(), tx.clone()))
-                .collect();
-
-            for s in ctx.to_send() {
-                let msg = OwnedMessage::new(
-                    Some(s.payload),
-                    Some(s.key.as_bytes().to_vec()),
-                    s.topic.clone(),
-                    rdkafka::Timestamp::NotAvailable,
-                    0,
-                    0,
-                    None,
-                );
-
-                if let Some(tx) = tx_hashmap_from_out_to_in.get(&s.topic) {
-                    tx.unbounded_send(msg.clone()).unwrap();
-                }
-
-                producer.get(&s.topic).unwrap().unbounded_send(msg).unwrap();
+    fn subscribe_inputs(&mut self, input_topics: &HashSet<String>) -> Result<(), ()> {
+        for (k, v) in self.topics.iter_mut() {
+            if input_topics.contains(k) {
+                v.input = true;
             }
         }
+        Ok(())
+    }
+
+    fn create_partitioned_consumer(&self, _partition: i32) -> TestsPartitionProcessor {
+        TestsPartitionProcessor {
+            topics: self.topics.clone(),
+        }
+    }
+
+    fn wait_to_finish(self) -> tokio::task::JoinHandle<Result<(), String>> {
+        let task = tokio::spawn(async move {
+            // TODO: This is ugly and we can implement better "wait" mechanism
+            // TODO: Support output topics where we don't receive every message, only if it's inputs
+            loop {
+                if self
+                    .topics
+                    .iter()
+                    .filter(|(_, t)| t.input)
+                    .all(|(_t, stats)| {
+                        let r = stats.recv.load(Ordering::Relaxed);
+                        let s = stats.sent.load(Ordering::Relaxed);
+
+                        s == r
+                    })
+                {
+                    break;
+                }
+                sleep(Duration::from_nanos(0)).await;
+            }
+
+            Ok(())
+        });
+
+        task
+    }
+
+    fn ensure_copartitioned(&mut self) -> Result<usize, ()> {
+        Ok(1)
     }
 }
 
@@ -165,8 +213,10 @@ pub struct Sender<T, F>
 where
     F: Decoder,
 {
+    topic: String,
     decoder: F,
-    tx: UnboundedSender<OwnedMessage>,
+    tx: tokio::sync::broadcast::Sender<OwnedMessage>,
+    sem: Arc<AtomicU32>,
     _marker: PhantomData<T>,
 }
 
@@ -175,26 +225,36 @@ where
     F: Decoder,
     T: Serialize,
 {
-    fn new(decoder: F, tx: UnboundedSender<OwnedMessage>) -> Self {
+    fn new(
+        topic: String,
+        decoder: F,
+        tx: tokio::sync::broadcast::Sender<OwnedMessage>,
+        sem: Arc<AtomicU32>,
+    ) -> Self {
         Self {
+            topic,
             decoder,
             tx,
+            sem,
             _marker: PhantomData,
         }
     }
 
-    pub async fn send(&mut self, key: String, msg: &T) -> Result<(), SendError> {
+    pub async fn send(&mut self, key: String, msg: &T) -> Result<usize, SendError<OwnedMessage>> {
         let data = self.decoder.decode(msg);
         let msg = OwnedMessage::new(
             Some(data),
             Some(key.as_bytes().to_vec()),
-            "".to_string(),
+            self.topic.clone(),
             rdkafka::Timestamp::NotAvailable,
             0,
             0,
             None,
         );
-        self.tx.send(msg).await
+
+        self.sem.fetch_add(1, Ordering::Relaxed);
+
+        self.tx.send(msg)
     }
 }
 
@@ -203,19 +263,24 @@ where
     E: Encoder<In = T>,
 {
     encoder: E,
-    rx: Arc<RwLock<UnboundedReceiver<OwnedMessage>>>,
+    rx: tokio::sync::broadcast::Receiver<OwnedMessage>,
 }
 
 impl<T, E> Receiver<T, E>
 where
     E: Encoder<In = T>,
 {
-    fn new(encoder: E, rx: Arc<RwLock<UnboundedReceiver<OwnedMessage>>>) -> Self {
+    fn new(encoder: E, rx: tokio::sync::broadcast::Receiver<OwnedMessage>) -> Self {
         Self { encoder, rx }
     }
 
-    pub async fn recv(&mut self) -> Option<T> {
-        let data = self.rx.write().await.next().await;
+    pub async fn recv(&mut self) -> Result<T, tokio::sync::broadcast::error::RecvError> {
+        let data = self.rx.recv().await;
+        data.map(|d| self.encoder.encode(d.payload()))
+    }
+
+    pub fn try_recv(&mut self) -> Result<T, tokio::sync::broadcast::error::TryRecvError> {
+        let data = self.rx.try_recv();
         data.map(|d| self.encoder.encode(d.payload()))
     }
 }
