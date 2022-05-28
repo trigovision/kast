@@ -24,16 +24,18 @@ fn json_encoder<T: DeserializeOwned>(data: Option<&[u8]>) -> T {
     serde_json::from_slice(data.expect("empty message")).unwrap()
 }
 
-async fn handle_clicks_stateless(ctx: &mut Context<ClicksPerUser>, _click: Click) {
+async fn handle_click(ctx: &mut Context<ClicksPerUser>, _click: Click) {
     let mut clicks_per_user = match ctx.get_state() {
         Some(state) => state.clone(),
         None => ClicksPerUser { clicks: 0 },
     };
+    println!("{:?}, {:?}", ctx.key(), clicks_per_user);
+
     clicks_per_user.clicks += 1;
     ctx.set_state(Some(clicks_per_user))
 }
 
-async fn emit_clicks_stateful(ctx: &mut Context<ClicksPerUser>, click: Click2) {
+async fn re_emit_clicks(ctx: &mut Context<ClicksPerUser>, click: Click2) {
     let key = ctx.key().to_string();
     for _ in 0..click.clicks {
         ctx.emit("c1", &key, &Click {})
@@ -47,7 +49,7 @@ async fn main() {
     let settings = ClientConfig::new()
         .set("bootstrap.servers", "localhost:9092")
         .set("partitioner", "murmur2")
-        .set("group.id", "keypoints")
+        .set("group.id", "keypoints111")
         .set("heartbeat.interval.ms", "250")
         .set("enable.auto.commit", "true")
         // This is important so offset won't be store automatically
@@ -59,12 +61,11 @@ async fn main() {
         .set("max.poll.interval.ms", "1500")
         .clone();
 
-    // let clicks_input = ;
     let mut p = Processor::new(
         KafkaProcessorHelper::new(settings),
         vec![
-            Input::new("c1".to_string(), json_encoder, handle_clicks_stateless),
-            Input::new("c2".to_string(), JsonEncoder::new(), emit_clicks_stateful),
+            Input::new("c1".to_string(), json_encoder, handle_click),
+            Input::new("c2".to_string(), JsonEncoder::new(), re_emit_clicks),
         ],
         vec![Output::new("c1".to_string())],
         HashMap::<String, ClicksPerUser>::new,
@@ -79,9 +80,7 @@ async fn main() {
 mod tests {
     use std::{collections::HashMap, sync::Arc};
 
-    use crate::{
-        emit_clicks_stateful, handle_clicks_stateless, json_encoder, Click, Click2, ClicksPerUser,
-    };
+    use crate::{handle_click, json_encoder, re_emit_clicks, Click, Click2, ClicksPerUser};
     use kast::{
         encoders::{JsonDecoder, JsonEncoder},
         input::Input,
@@ -105,8 +104,8 @@ mod tests {
         let mut p = Processor::new(
             t,
             vec![
-                Input::new("c1".to_string(), json_encoder, handle_clicks_stateless),
-                Input::new("c2".to_string(), JsonEncoder::new(), emit_clicks_stateful),
+                Input::new("c1".to_string(), json_encoder, handle_click),
+                Input::new("c2".to_string(), JsonEncoder::new(), re_emit_clicks),
             ],
             vec![Output::new("c1".to_string())],
             move || state_store_clone.clone(),

@@ -12,7 +12,7 @@ use crate::{
     context::Context,
     input::GenericInput,
     output::Output,
-    processor_helper::{KafkaProcessorImplementor, PartitionHelper},
+    processor_helper::{KafkaProcessorImplementor, PartitionHelper, IntoKafkaStream},
     state_store::StateStore,
 };
 
@@ -63,7 +63,7 @@ where
             self.outputs.iter().map(|o| o.topic().to_string()).collect();
 
         self.helper
-            .prepare_input_outputs(&input_topcis_set, &output_topcis_set)
+            .subscribe_inputs(&input_topcis_set)
             .unwrap();
 
         let num_partitions = self.helper.ensure_copartitioned().unwrap();
@@ -82,16 +82,18 @@ where
             tokio::spawn(async move {
                 let mut state_store = gen();
                 let mut extra_state = gen2();
-                let iter = inputs.keys().into_iter().map(|topic| {
-                    Box::pin(partition_handler.create_partitioned_topic_stream(&topic))
-                    .map(move |msg| (topic, msg))
-                });
-                let mut streams = select_all(iter);
+                // let iter = ;
+                // let bla = iter.map(|handle| Box::pin(handle.stream()));
+                let bla: Vec<_> = inputs.keys().into_iter().map(|topic| {
+                    partition_handler.create_partitioned_topic_stream(&topic)
+                    // .map(move |msg| (topic, msg))
+                }).collect();
+                let mut streams = select_all(bla.iter().map(|h|Box::pin(h.stream())));
 
                 b_clone.wait().await;
-
-                while let Some((topic, msg)) = streams.next().await {
+                while let Some(msg) = streams.next().await {
                     let msg = msg.unwrap();
+                    println!("{:?}", msg);
 
                     //TODO: Key serializer?
                     let key = std::str::from_utf8(msg.key().unwrap()).unwrap();
@@ -99,7 +101,7 @@ where
                     let state = state_store.get(key).await.map(|s| s.clone());
                     let mut ctx = Context::new(key, state);
 
-                    let handler = inputs.get(topic).expect("streams are created from inputs keys");
+                    let handler = inputs.get(msg.topic()).expect("streams are created from inputs keys");
                     handler.handle(&mut extra_state, &mut ctx, msg.payload()).await;
 
                     if let Some(state) = &ctx.get_new_state() {
@@ -114,8 +116,6 @@ where
                     // NOTE: It is extremly important that this will happen here and not inside the spawn to gurantee order of msgs!
                     let helper_clone = partition_handler.clone();
 
-
-
                     let output_topcis_set = output_topcis_set.clone();
                     let sends = ctx.to_send().into_iter().map(move |s| {
                         assert!(output_topcis_set.contains(&s.topic.to_string())); //TODO: Should we remove this assertion?
@@ -123,8 +123,6 @@ where
                             .send_result(FutureRecord::to(&s.topic).key(&s.key).payload(&s.payload))
                             .unwrap()
                     });
-
-
 
                     let helper_clone = partition_handler.clone();
                     tokio::spawn(async move {
@@ -141,10 +139,8 @@ where
     }
 
     pub async fn join(self) {
-        let input_topcis_set: HashSet<String> = self.inputs.keys().cloned().collect();
-
         self.helper
-            .wait_to_finish(&input_topcis_set)
+            .wait_to_finish()
             .await
             .unwrap()
             .unwrap();

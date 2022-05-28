@@ -9,6 +9,7 @@ use std::{
     time::Duration,
 };
 
+use futures::{Stream, StreamExt};
 use rdkafka::{
     error::{KafkaError, KafkaResult},
     message::{OwnedMessage, ToBytes},
@@ -24,7 +25,6 @@ pub struct TopicTestHelper {
     sent: Arc<AtomicU32>,
     recv: Arc<AtomicU32>,
     input: bool,
-    output: bool,
     // Note: we store _ch_rx so sends to a channel which isn't input
     // Wont panic when there are no subscribers
     _ch_rx: tokio::sync::broadcast::Receiver<OwnedMessage>,
@@ -38,7 +38,6 @@ impl Clone for TopicTestHelper {
             sent: self.sent.clone(),
             recv: self.recv.clone(),
             input: self.input.clone(),
-            output: self.output.clone(),
         }
     }
 }
@@ -53,7 +52,6 @@ impl Default for TopicTestHelper {
             sent: Default::default(),
             recv: Default::default(),
             input: false,
-            output: false,
         }
     }
 }
@@ -98,14 +96,27 @@ pub struct TestsPartitionProcessor {
     topics: HashMap<String, TopicTestHelper>,
 }
 
+impl IntoKafkaStream for tokio::sync::broadcast::Sender<OwnedMessage> {
+    type Error = BroadcastStreamRecvError;
+
+    fn stream<'a>(
+        &'a self,
+    ) -> Pin<Box<dyn Stream<Item = Result<OwnedMessage, Self::Error>> + Send + 'a>> {
+        BroadcastStream::new(self.subscribe()).boxed()
+    }
+}
+
 impl PartitionHelper for TestsPartitionProcessor {
     type DeliveryFutureType = Pin<Box<dyn futures::Future<Output = ()> + Send>>;
     type Error = BroadcastStreamRecvError;
-    type OwnedStreamableType = BroadcastStream<OwnedMessage>;
+    type OwnedStreamableType = tokio::sync::broadcast::Sender<OwnedMessage>;
 
-    fn create_partitioned_topic_stream(&self, topic_name: &str) -> Self::OwnedStreamableType {
+    fn create_partitioned_topic_stream<'a>(
+        &'a self,
+        topic_name: &str,
+    ) -> tokio::sync::broadcast::Sender<OwnedMessage> {
         let rec = self.topics.get(topic_name).unwrap();
-        BroadcastStream::new(rec.ch_tx.subscribe())
+        rec.ch_tx.clone()
     }
 
     fn send_result<'a, K, P>(
@@ -145,23 +156,15 @@ impl PartitionHelper for TestsPartitionProcessor {
 
 use crate::{
     encoders::{Decoder, Encoder},
-    processor_helper::{KafkaProcessorImplementor, PartitionHelper},
+    processor_helper::{IntoKafkaStream, KafkaProcessorImplementor, PartitionHelper},
 };
 impl KafkaProcessorImplementor for TestsProcessorHelper {
     type PartitionHelperType = TestsPartitionProcessor;
 
-    fn prepare_input_outputs(
-        &mut self,
-        input_topics: &HashSet<String>,
-        output_topics: &HashSet<String>,
-    ) -> Result<(), ()> {
+    fn subscribe_inputs(&mut self, input_topics: &HashSet<String>) -> Result<(), ()> {
         for (k, v) in self.topics.iter_mut() {
             if input_topics.contains(k) {
                 v.input = true;
-            }
-
-            if output_topics.contains(k) {
-                v.output = true;
             }
         }
         Ok(())
@@ -173,10 +176,7 @@ impl KafkaProcessorImplementor for TestsProcessorHelper {
         }
     }
 
-    fn wait_to_finish(
-        self,
-        _topics: &HashSet<String>,
-    ) -> tokio::task::JoinHandle<Result<(), String>> {
+    fn wait_to_finish(self) -> tokio::task::JoinHandle<Result<(), String>> {
         let task = tokio::spawn(async move {
             // TODO: This is ugly and we can implement better "wait" mechanism
             // TODO: Support output topics where we don't receive every message, only if it's inputs

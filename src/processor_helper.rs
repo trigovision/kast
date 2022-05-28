@@ -1,6 +1,6 @@
-use std::{collections::HashSet, fmt::Debug, sync::Arc, time::Duration};
+use std::{collections::HashSet, fmt::Debug, pin::Pin, sync::Arc, time::Duration};
 
-use futures::{Stream, StreamExt};
+use futures::{Stream, StreamExt, TryStreamExt};
 use rdkafka::{
     consumer::{
         stream_consumer::StreamPartitionQueue, Consumer, DefaultConsumerContext, StreamConsumer,
@@ -11,35 +11,27 @@ use rdkafka::{
     ClientConfig,
 };
 
-pub struct PartitionQueueWrapper {
-    queue: StreamPartitionQueue<DefaultConsumerContext>,
+pub trait IntoKafkaStream {
+    type Error;
+    fn stream<'a>(
+        &'a self,
+    ) -> Pin<Box<dyn Stream<Item = Result<OwnedMessage, Self::Error>> + Send + 'a>>;
 }
 
-impl PartitionQueueWrapper {
-    fn new(a: StreamPartitionQueue<DefaultConsumerContext>) -> Self {
-        Self { queue: a }
-    }
-}
+impl IntoKafkaStream for StreamPartitionQueue<DefaultConsumerContext> {
+    type Error = KafkaError;
 
-//TODO: Make this borrowed message instead of owned!
-impl Stream for PartitionQueueWrapper {
-    type Item = KafkaResult<OwnedMessage>;
-
-    fn poll_next(
-        self: std::pin::Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<Option<Self::Item>> {
-        self.queue
-            .stream()
-            .poll_next_unpin(cx)
-            .map_ok(|a| a.detach())
+    fn stream<'a>(
+        &'a self,
+    ) -> Pin<Box<dyn Stream<Item = Result<OwnedMessage, Self::Error>> + Send + 'a>> {
+        self.stream().map_ok(|m| m.detach()).boxed()
     }
 }
 
 pub trait PartitionHelper: Send + Clone {
     type DeliveryFutureType: futures::Future + Send;
     type Error: Debug + Send;
-    type OwnedStreamableType: Stream<Item = Result<OwnedMessage, Self::Error>> + Send;
+    type OwnedStreamableType: IntoKafkaStream<Error = Self::Error> + Send;
 
     fn create_partitioned_topic_stream(&self, topic_name: &str) -> Self::OwnedStreamableType;
 
@@ -57,20 +49,13 @@ pub trait PartitionHelper: Send + Clone {
 pub trait KafkaProcessorImplementor: Send {
     type PartitionHelperType: PartitionHelper + Sync;
 
-    fn prepare_input_outputs(
-        &mut self,
-        input_topics: &HashSet<String>,
-        output_topics: &HashSet<String>,
-    ) -> Result<(), ()>;
+    fn subscribe_inputs(&mut self, input_topics: &HashSet<String>) -> Result<(), ()>;
 
     fn ensure_copartitioned(&mut self) -> Result<usize, ()>;
 
     fn create_partitioned_consumer(&self, partition: i32) -> Self::PartitionHelperType;
 
-    fn wait_to_finish(
-        self,
-        topics: &HashSet<String>,
-    ) -> tokio::task::JoinHandle<Result<(), String>>;
+    fn wait_to_finish(self) -> tokio::task::JoinHandle<Result<(), String>>;
 }
 
 pub struct KafkaProcessorHelper {
@@ -103,16 +88,18 @@ pub struct KafkaPartitionProcessor {
 impl PartitionHelper for KafkaPartitionProcessor {
     type DeliveryFutureType = DeliveryFuture;
     type Error = KafkaError;
-    type OwnedStreamableType = PartitionQueueWrapper;
+    type OwnedStreamableType = StreamPartitionQueue<DefaultConsumerContext>;
 
     fn create_partitioned_topic_stream(&self, topic_name: &str) -> Self::OwnedStreamableType {
         let partition_queue = self
             .stream_consumer
-            .clone()
             .split_partition_queue(topic_name, self.partition)
             .unwrap();
 
-        PartitionQueueWrapper::new(partition_queue)
+        // self.stream_consumer.spl
+        // let bla = partition_queue.stream().map_ok(|m| m.detach());
+        // bla.boxed()
+        partition_queue
     }
 
     fn send_result<'a, K, P>(
@@ -134,11 +121,18 @@ impl PartitionHelper for KafkaPartitionProcessor {
 impl KafkaProcessorImplementor for KafkaProcessorHelper {
     type PartitionHelperType = KafkaPartitionProcessor;
 
-    fn prepare_input_outputs(
-        &mut self,
-        _input_topics: &HashSet<String>,
-        _output_topics: &HashSet<String>,
-    ) -> Result<(), ()> {
+    fn subscribe_inputs(&mut self, input_topics: &HashSet<String>) -> Result<(), ()> {
+        self.inputs.extend(input_topics.clone()); //TODO: This is strange
+        self.stream_consumer
+            .subscribe(
+                input_topics
+                    .iter()
+                    .map(|topic| topic.as_ref())
+                    .collect::<Vec<&str>>()
+                    .as_slice(),
+            )
+            .unwrap();
+
         Ok(())
     }
 
@@ -150,25 +144,10 @@ impl KafkaProcessorImplementor for KafkaProcessorHelper {
         }
     }
 
-    fn wait_to_finish(
-        self,
-        topics: &HashSet<String>,
-    ) -> tokio::task::JoinHandle<Result<(), String>> {
-        let stream_consumer = self.stream_consumer.clone();
-
-        stream_consumer
-            .subscribe(
-                topics
-                    .iter()
-                    .map(|topic| topic.as_ref())
-                    .collect::<Vec<&str>>()
-                    .as_slice(),
-            )
-            .unwrap();
-
+    fn wait_to_finish(self) -> tokio::task::JoinHandle<Result<(), String>> {
         let task = tokio::spawn(async move {
             loop {
-                let message = stream_consumer.recv().await;
+                let message = self.stream_consumer.recv().await;
                 let err = format!(
                     "main stream consumer queue unexpectedly received message: {:?}",
                     message
