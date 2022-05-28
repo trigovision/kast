@@ -188,7 +188,6 @@ impl KafkaProcessorImplementor for TestsProcessorHelper {
                     .all(|(_t, stats)| {
                         let r = stats.recv.load(Ordering::Relaxed);
                         let s = stats.sent.load(Ordering::Relaxed);
-
                         s == r
                     })
                 {

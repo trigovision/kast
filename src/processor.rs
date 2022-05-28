@@ -130,10 +130,8 @@ where
                         let mut lock = offset_lock_for_partitioned_topic.lock().await;
                         if msg_offset > *lock {
                             *lock = msg_offset;
-                            helper_clone
-                            .store_offset(&msg_topic, *lock)
-                            .unwrap();
                         }
+                        helper_clone.store_offset(&msg_topic, *lock).unwrap();
                     });
                 }
             });

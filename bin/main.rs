@@ -29,9 +29,10 @@ async fn handle_click(ctx: &mut Context<ClicksPerUser>, _click: Click) {
         Some(state) => state.clone(),
         None => ClicksPerUser { clicks: 0 },
     };
-    println!("{:?}, {:?}", ctx.key(), clicks_per_user);
 
     clicks_per_user.clicks += 1;
+    println!("{:?}, {:?}", ctx.key(), clicks_per_user);
+
     ctx.set_state(Some(clicks_per_user))
 }
 
