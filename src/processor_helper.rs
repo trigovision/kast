@@ -167,7 +167,6 @@ impl KafkaProcessorImplementor for KafkaProcessorHelper {
             .unwrap();
 
         let task = tokio::spawn(async move {
-            //TODO: Fix this
             loop {
                 let message = stream_consumer.recv().await;
                 let err = format!(
@@ -176,8 +175,6 @@ impl KafkaProcessorImplementor for KafkaProcessorHelper {
                 );
                 return Err(err);
             }
-
-            Ok(())
         });
 
         task

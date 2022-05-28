@@ -57,10 +57,6 @@ where
         }
     }
 
-    pub fn helper(&mut self) -> &mut H {
-        &mut self.helper
-    }
-
     pub async fn start(&mut self) {
         let input_topcis_set: HashSet<String> = self.inputs.keys().cloned().collect();
         let output_topcis_set: HashSet<String> =
@@ -144,7 +140,6 @@ where
         partitions_barrier.wait().await;
     }
 
-    // TODO: Can we move it back to run and support something to notify initialization?
     pub async fn join(self) {
         let input_topcis_set: HashSet<String> = self.inputs.keys().cloned().collect();
 
