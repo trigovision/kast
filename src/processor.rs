@@ -32,11 +32,8 @@ where
     F1: FnOnce() -> TStore + Send + Clone + 'static,
     F2: FnOnce() -> TExtraState + Clone + Send + 'static,
     TExtraState: Send + 'static,
-    //TODO: Refine the constraints?
     H: KafkaProcessorImplementor + Sync + 'static,
-    // <H::DeliveryFutureType as futures::Future>::Output: Send,
     <<<H as KafkaProcessorImplementor>::PartitionHelperType as PartitionHelper>::DeliveryFutureType as futures::Future>::Output: std::marker::Send,
-    <<H as KafkaProcessorImplementor>::PartitionHelperType as PartitionHelper>::M: Sync + Send
 {
     pub fn new(
         helper: H,
@@ -75,31 +72,29 @@ where
 
         let num_partitions = self.helper.ensure_copartitioned().unwrap();
 
-        let b = Arc::new(Barrier::new(num_partitions + 1)); //TODO: Change barrier to something else?
+        let partitions_barrier = Arc::new(Barrier::new(num_partitions + 1));
         for partition in 0..num_partitions {
-            let partitioned_topics: Vec<Box<dyn GenericInput<TState, TExtraState>>> = self
-                .inputs
-                .iter()
-                .map(|(_, input_handler)| input_handler.clone())
-                .collect();
+            let inputs = self.inputs.clone();               
 
             let gen = self.state_store_gen.clone();
             let gen2 = self.extra_state_gen.clone();
 
             let output_topcis_set = output_topcis_set.clone();
             let partition_handler = self.helper.create_partitioned_consumer(partition as i32);
-            let b_clone = b.clone();
+            let b_clone = partitions_barrier.clone();
+            
             tokio::spawn(async move {
                 let mut state_store = gen();
                 let mut extra_state = gen2();
-                let iter = partitioned_topics.into_iter().map(|h| {
-                    Box::pin(partition_handler.create_partitioned_topic_stream(&h.topic()))
-                    .map(move |msg| (h.clone(), msg))
+                let iter = inputs.keys().into_iter().map(|topic| {
+                    Box::pin(partition_handler.create_partitioned_topic_stream(&topic))
+                    .map(move |msg| (topic, msg))
                 });
+                let mut streams = select_all(iter);
 
-                let mut select_all = select_all(iter);
                 b_clone.wait().await;
-                while let Some((h, msg)) = select_all.next().await {
+
+                while let Some((topic, msg)) = streams.next().await {
                     let msg = msg.unwrap();
 
                     //TODO: Key serializer?
@@ -108,7 +103,8 @@ where
                     let state = state_store.get(key).await.map(|s| s.clone());
                     let mut ctx = Context::new(key, state);
 
-                    h.handle(&mut extra_state, &mut ctx, msg.payload()).await;
+                    let handler = inputs.get(topic).expect("streams are created from inputs keys");
+                    handler.handle(&mut extra_state, &mut ctx, msg.payload()).await;
 
                     if let Some(state) = &ctx.get_new_state() {
                         state_store.set(key.to_string(), state.clone()).await;
@@ -144,7 +140,8 @@ where
                 }
             });
         }
-        b.wait().await;
+
+        partitions_barrier.wait().await;
     }
 
     // TODO: Can we move it back to run and support something to notify initialization?

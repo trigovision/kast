@@ -115,7 +115,7 @@ mod tests {
 
         p.start().await;
 
-        for _i in 0..1000 {
+        for _i in 0..100000 {
             in1.send("a".to_string(), &Click {}).await.unwrap();
         }
 
@@ -134,7 +134,7 @@ mod tests {
         p.join().await;
 
         let final_state: ClicksPerUser = state_store.get("a").await.unwrap();
-        assert_eq!(final_state.clicks, 11000);
+        assert_eq!(final_state.clicks, 110000);
 
         let final_state: ClicksPerUser = state_store.get("b").await.unwrap();
         assert_eq!(final_state.clicks, 10000);

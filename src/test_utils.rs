@@ -101,7 +101,6 @@ pub struct TestsPartitionProcessor {
 impl PartitionHelper for TestsPartitionProcessor {
     type DeliveryFutureType = Pin<Box<dyn futures::Future<Output = ()> + Send>>;
     type Error = BroadcastStreamRecvError;
-    type M = OwnedMessage;
     type OwnedStreamableType = BroadcastStream<OwnedMessage>;
 
     fn create_partitioned_topic_stream(&self, topic_name: &str) -> Self::OwnedStreamableType {

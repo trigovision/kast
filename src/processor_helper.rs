@@ -1,50 +1,45 @@
-use std::{collections::HashSet, fmt::Debug, marker::PhantomData, sync::Arc, time::Duration};
+use std::{collections::HashSet, fmt::Debug, sync::Arc, time::Duration};
 
 use futures::{Stream, StreamExt};
 use rdkafka::{
     consumer::{
-        stream_consumer::StreamPartitionQueue, Consumer, DefaultConsumerContext, MessageStream,
-        StreamConsumer,
+        stream_consumer::StreamPartitionQueue, Consumer, DefaultConsumerContext, StreamConsumer,
     },
     error::{KafkaError, KafkaResult},
-    message::{BorrowedMessage, OwnedMessage, ToBytes},
+    message::{OwnedMessage, ToBytes},
     producer::{DeliveryFuture, FutureProducer, FutureRecord},
-    ClientConfig, Message,
+    ClientConfig,
 };
 
-pub struct ShittyKafkaShit<'a> {
-    a: StreamPartitionQueue<DefaultConsumerContext>,
-    // b: MessageStream<'a>,
-    b: PhantomData<&'a u32>,
+pub struct PartitionQueueWrapper {
+    queue: StreamPartitionQueue<DefaultConsumerContext>,
 }
 
-impl<'a> ShittyKafkaShit<'a> {
+impl PartitionQueueWrapper {
     fn new(a: StreamPartitionQueue<DefaultConsumerContext>) -> Self {
-        Self {
-            a,
-            // b: a.stream(),
-            b: PhantomData,
-        }
+        Self { queue: a }
     }
 }
 
 //TODO: Make this borrowed message instead of owned!
-impl<'a> Stream for ShittyKafkaShit<'a> {
+impl Stream for PartitionQueueWrapper {
     type Item = KafkaResult<OwnedMessage>;
 
     fn poll_next(
         self: std::pin::Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<Option<Self::Item>> {
-        self.a.stream().poll_next_unpin(cx).map_ok(|a| a.detach())
+        self.queue
+            .stream()
+            .poll_next_unpin(cx)
+            .map_ok(|a| a.detach())
     }
 }
 
 pub trait PartitionHelper: Send + Clone {
     type DeliveryFutureType: futures::Future + Send;
     type Error: Debug + Send;
-    type M: Message;
-    type OwnedStreamableType: Stream<Item = Result<Self::M, Self::Error>> + Send + Sync + 'static;
+    type OwnedStreamableType: Stream<Item = Result<OwnedMessage, Self::Error>> + Send;
 
     fn create_partitioned_topic_stream(&self, topic_name: &str) -> Self::OwnedStreamableType;
 
@@ -108,17 +103,16 @@ pub struct KafkaPartitionProcessor {
 impl PartitionHelper for KafkaPartitionProcessor {
     type DeliveryFutureType = DeliveryFuture;
     type Error = KafkaError;
-    type M = OwnedMessage;
-    type OwnedStreamableType = ShittyKafkaShit<'static>;
+    type OwnedStreamableType = PartitionQueueWrapper;
 
     fn create_partitioned_topic_stream(&self, topic_name: &str) -> Self::OwnedStreamableType {
-        let bla = self
+        let partition_queue = self
             .stream_consumer
             .clone()
             .split_partition_queue(topic_name, self.partition)
             .unwrap();
 
-        ShittyKafkaShit::new(bla)
+        PartitionQueueWrapper::new(partition_queue)
     }
 
     fn send_result<'a, K, P>(
