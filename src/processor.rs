@@ -35,7 +35,8 @@ where
     //TODO: Refine the constraints?
     H: KafkaProcessorImplementor + Sync + 'static,
     // <H::DeliveryFutureType as futures::Future>::Output: Send,
-    <<<H as KafkaProcessorImplementor>::PartitionHelperType as PartitionHelper>::DeliveryFutureType as futures::Future>::Output: std::marker::Send
+    <<<H as KafkaProcessorImplementor>::PartitionHelperType as PartitionHelper>::DeliveryFutureType as futures::Future>::Output: std::marker::Send,
+    <<H as KafkaProcessorImplementor>::PartitionHelperType as PartitionHelper>::M: Sync + Send
 {
     pub fn new(
         helper: H,
