@@ -109,7 +109,7 @@ mod tests {
                 Input::new("c2".to_string(), JsonEncoder::new(), re_emit_clicks),
             ],
             vec![Output::new("c1".to_string())],
-            move || state_store_clone.clone(),
+            move || state_store_clone,
             || (),
         );
 
