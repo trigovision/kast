@@ -50,6 +50,12 @@ impl<T> JsonEncoder<T> {
     }
 }
 
+impl<T> Default for JsonEncoder<T> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl<T> Encoder for JsonEncoder<T>
 where
     T: DeserializeOwned,
@@ -65,6 +71,12 @@ pub struct JsonDecoder {}
 impl JsonDecoder {
     pub fn new() -> Self {
         Self {}
+    }
+}
+
+impl Default for JsonDecoder {
+    fn default() -> Self {
+        Self::new()
     }
 }
 impl Decoder for JsonDecoder {

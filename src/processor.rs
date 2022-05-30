@@ -59,7 +59,7 @@ where
 
     pub async fn start(&mut self) {
         let input_topcis_set: HashSet<String> = self.inputs.keys().cloned().collect();
-        let output_topcis_set: HashSet<String> =
+        let output_topics_set: HashSet<String> =
             self.outputs.iter().map(|o| o.topic().to_string()).collect();
 
         self.helper
@@ -71,7 +71,7 @@ where
         let partitions_barrier = Arc::new(Barrier::new(num_partitions + 1));
         for partition in 0..num_partitions as i32 {
             let inputs = self.inputs.clone();               
-            let output_topcis_set = output_topcis_set.clone();
+            let output_topics_set = output_topics_set.clone();
             let partition_handler = self.helper.create_partitioned_consumer(partition as i32);
             let partitions_barrier_clone = partitions_barrier.clone();
             let gen = self.state_store_gen.clone();
@@ -80,7 +80,7 @@ where
                 let mut state_store = gen();
                 let mut extra_state = gen2();
                 let stream_gens: Vec<_> = inputs.keys().into_iter().map(|topic| {
-                    partition_handler.create_partitioned_topic_stream(&topic)
+                    partition_handler.create_partitioned_topic_stream(topic)
                 }).collect(); 
                 let mut topic_partition_offset_locks = HashMap::new();
                 let mut streams = select_all(
@@ -112,16 +112,16 @@ where
                     let msg_offset = msg.offset();
 
                     let helper_clone = partition_handler.clone();
-                    let output_topcis_set = output_topcis_set.clone();
+                    let output_topics_set = output_topics_set.clone();
                     let sends = ctx.to_send().into_iter().map(move |s| {
-                        assert!(output_topcis_set.contains(&s.topic.to_string())); //TODO: Should we remove this assertion?
+                        assert!(output_topics_set.contains(&s.topic)); //TODO: Should we remove this assertion?
                         helper_clone
                             .send_result(FutureRecord::to(&s.topic).key(&s.key).payload(&s.payload))
                             .unwrap()
                     }); 
 
                     let mut helper_clone = partition_handler.clone();
-                    let offset_lock_for_partitioned_topic = topic_partition_offset_locks.entry(msg_topic.clone()).or_insert(Arc::new(Mutex::new(msg_offset))).clone();  
+                    let offset_lock_for_partitioned_topic = topic_partition_offset_locks.entry(msg_topic.clone()).or_insert_with(|| Arc::new(Mutex::new(msg_offset))).clone();  
                     tokio::spawn(async move {
                         join_all(sends).await;
 

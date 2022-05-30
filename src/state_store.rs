@@ -13,7 +13,7 @@ where
 {
     async fn get<Q: ?Sized + Sync>(&self, k: &Q) -> Option<V>
     where
-        K: std::borrow::Borrow<Q>,
+        K: Borrow<Q>,
         Q: Eq + Hash;
     async fn set(&mut self, k: K, v: V) -> Option<V>;
 }
@@ -29,7 +29,7 @@ where
         K: Borrow<Q>,
         Q: Eq + Hash,
     {
-        self.get(k).map(|v| v.clone())
+        self.get(k).cloned()
     }
     async fn set(&mut self, k: K, v: V) -> Option<V> {
         self.insert(k, v)
@@ -39,7 +39,7 @@ where
 #[async_trait::async_trait]
 impl<K, V> StateStore<K, V> for Arc<RwLock<HashMap<K, V>>>
 where
-    K: Eq + std::hash::Hash + Sync + Send,
+    K: Eq + Hash + Sync + Send,
     V: Send + Sync + Clone,
 {
     async fn get<Q: ?Sized + Sync>(&self, k: &Q) -> Option<V>
@@ -47,7 +47,7 @@ where
         K: Borrow<Q>,
         Q: Eq + Hash,
     {
-        self.read().await.get(k).map(|v| v.clone())
+        self.read().await.get(k).cloned()
     }
 
     async fn set(&mut self, k: K, v: V) -> Option<V> {

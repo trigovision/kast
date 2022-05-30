@@ -37,7 +37,7 @@ impl Clone for TopicTestHelper {
             _ch_rx: self.ch_tx.subscribe(),
             sent: self.sent.clone(),
             recv: self.recv.clone(),
-            input: self.input.clone(),
+            input: self.input,
         }
     }
 }
@@ -64,8 +64,7 @@ impl TestsProcessorHelper {
     pub fn new(topics: Vec<&str>) -> Self {
         let mut m = HashMap::new();
         for topic in topics {
-            m.entry(topic.to_string())
-                .or_insert(TopicTestHelper::default());
+            m.entry(topic.to_string()).or_default();
         }
 
         Self { topics: m }
@@ -111,8 +110,8 @@ impl PartitionHelper for TestsPartitionProcessor {
     type Error = BroadcastStreamRecvError;
     type OwnedStreamableType = tokio::sync::broadcast::Sender<OwnedMessage>;
 
-    fn create_partitioned_topic_stream<'a>(
-        &'a self,
+    fn create_partitioned_topic_stream(
+        &self,
         topic_name: &str,
     ) -> tokio::sync::broadcast::Sender<OwnedMessage> {
         let rec = self.topics.get(topic_name).unwrap();
@@ -140,7 +139,7 @@ impl PartitionHelper for TestsPartitionProcessor {
         let rec = self.topics.get(record.topic).unwrap();
         rec.sent.fetch_add(1, Ordering::Relaxed);
         rec.ch_tx.send(msg).unwrap();
-        Ok(Box::pin(async move { () }))
+        Ok(Box::pin(async move {}))
     }
 
     fn store_offset(&mut self, topic: &str, _offset: i64) -> KafkaResult<()> {
@@ -177,7 +176,7 @@ impl KafkaProcessorImplementor for TestsProcessorHelper {
     }
 
     fn wait_to_finish(self) -> tokio::task::JoinHandle<Result<(), String>> {
-        let task = tokio::spawn(async move {
+        tokio::spawn(async move {
             // TODO: This is ugly and we can implement better "wait" mechanism
             // TODO: Support output topics where we don't receive every message, only if it's inputs
             loop {
@@ -197,9 +196,7 @@ impl KafkaProcessorImplementor for TestsProcessorHelper {
             }
 
             Ok(())
-        });
-
-        task
+        })
     }
 
     fn ensure_copartitioned(&mut self) -> Result<usize, ()> {

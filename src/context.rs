@@ -2,7 +2,7 @@ use serde::Serialize;
 
 pub struct Context<T = ()> {
     key: String,
-    origingal_state: Option<T>,
+    original_state: Option<T>,
     new_state: Option<T>,
     sends: Vec<FutureDeliverableMessage>,
 }
@@ -21,7 +21,7 @@ where
     pub fn new(key: &str, state: Option<T>) -> Self {
         Self {
             key: key.to_string(),
-            origingal_state: state,
+            original_state: state,
             new_state: None,
             sends: vec![],
             // deserializers: HashMap::new(),
@@ -33,7 +33,7 @@ where
     }
 
     pub fn get_state(&self) -> &Option<T> {
-        &self.origingal_state
+        &self.original_state
     }
 
     pub fn get_new_state(&self) -> &Option<T> {

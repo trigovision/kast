@@ -140,18 +140,14 @@ impl KafkaProcessorImplementor for KafkaProcessorHelper {
     }
 
     fn wait_to_finish(self) -> tokio::task::JoinHandle<Result<(), String>> {
-        let task = tokio::spawn(async move {
-            loop {
-                let message = self.stream_consumer.recv().await;
-                let err = format!(
-                    "main stream consumer queue unexpectedly received message: {:?}",
-                    message
-                );
-                return Err(err);
-            }
-        });
-
-        task
+        tokio::spawn(async move {
+            let message = self.stream_consumer.recv().await;
+            let err = format!(
+                "main stream consumer queue unexpectedly received message: {:?}",
+                message
+            );
+            Err(err)
+        })
     }
 
     fn ensure_copartitioned(&mut self) -> Result<usize, ()> {
@@ -167,17 +163,15 @@ impl KafkaProcessorImplementor for KafkaProcessorHelper {
             .map(|topic| (topic.name().to_string(), topic.partitions().len()))
             .collect();
 
-        if topics_partitions.len() < 1 {
+        if topics_partitions.is_empty() {
             Err(())
+        } else if topics_partitions
+            .iter()
+            .all(|(_, partitions)| partitions.eq(&topics_partitions[0].1))
+        {
+            Ok(topics_partitions[0].1)
         } else {
-            if topics_partitions
-                .iter()
-                .all(|(_, partitions)| partitions.eq(&topics_partitions[0].1))
-            {
-                Ok(topics_partitions[0].1)
-            } else {
-                Err(())
-            }
+            Err(())
         }
     }
 }
