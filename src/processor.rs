@@ -13,12 +13,13 @@ use crate::{
     input::GenericInput,
     output::Output,
     processor_helper::{IntoKafkaStream, KafkaProcessorImplementor, PartitionHelper},
-    state_store::StateStore,
+    state_store::{StateStore, StateStoreError},
 };
 
 pub struct Processor<TState, TExtraState, TStore, F1, F2, H> {
+    state_namespace: String,
     helper: H,
-    inputs: HashMap<String, Box<dyn GenericInput<TState, TExtraState>>>,
+    inputs: HashMap<String, Box<dyn GenericInput<TState, TExtraState, TStore>>>,
     state_store_gen: F1,
     extra_state_gen: F2,
     outputs: Vec<Output>,
@@ -28,16 +29,17 @@ pub struct Processor<TState, TExtraState, TStore, F1, F2, H> {
 impl<TState, TExtraState, TStore, F1, F2, H> Processor<TState, TExtraState, TStore, F1, F2, H>
 where
     TState: Clone + Send + Sync + 'static,
-    TStore: StateStore<String, TState> + Send + Sync,
-    F1: FnOnce() -> TStore + Send + Clone + 'static,
+    TStore: StateStore<TState> + Send + Sync + 'static,
+    F1: FnOnce() -> Arc<Mutex<TStore>> + Send + Clone + 'static,
     F2: FnOnce() -> TExtraState + Clone + Send + 'static,
     TExtraState: Send + 'static,
     H: KafkaProcessorImplementor + Sync + 'static,
     <<<H as KafkaProcessorImplementor>::PartitionHelperType as PartitionHelper>::DeliveryFutureType as futures::Future>::Output: std::marker::Send,
 {
     pub fn new(
+        state_namespace: &str,
         helper: H,
-        inputs: Vec<Box<dyn GenericInput<TState, TExtraState>>>,
+        inputs: Vec<Box<dyn GenericInput<TState, TExtraState, TStore>>>,
         outputs: Vec<Output>,
         state_store_gen: F1,
         extra_state_gen: F2,
@@ -48,6 +50,7 @@ where
             .collect();
 
         Processor {
+            state_namespace: state_namespace.to_string(),
             helper,
             inputs,
             outputs,
@@ -76,8 +79,9 @@ where
             let partitions_barrier_clone = partitions_barrier.clone();
             let gen = self.state_store_gen.clone();
             let gen2 = self.extra_state_gen.clone();
+            let state_namespace = self.state_namespace.clone();
             tokio::spawn(async move {
-                let mut state_store = gen();
+                let state_store = gen();
                 let mut extra_state = gen2();
                 let stream_gens: Vec<_> = inputs.keys().into_iter().map(|topic| {
                     partition_handler.create_partitioned_topic_stream(topic)
@@ -97,17 +101,22 @@ where
                     //TODO: Key serializer?
                     let key = std::str::from_utf8(msg.key().unwrap()).unwrap();
 
-                    let state = state_store.get(key).await.map(|s| s.clone());
-                    let mut ctx = Context::new(key, state);
+                    let state = match state_store.lock().await.get(&state_namespace, key).await {
+                        Ok(state) => Some(state),
+                        Err(StateStoreError::MissingKey(_)) => None,
+                        Err(e) => {
+                            panic!("Failed to get state while handling message on topic {}: {:?}", msg.topic(), e);
+                        },
+                    };
+                    let mut ctx = Context::new(key, state, Arc::clone(&state_store));
 
                     let handler = inputs.get(msg.topic()).expect("streams are created from inputs keys");
-                    handler.handle(&mut extra_state, &mut ctx, msg.payload()).await;
-
-                    if let Some(state) = &ctx.get_new_state() {
-                        state_store.set(key.to_string(), state.clone()).await;
+                    if let Some(state) = handler.handle(&mut extra_state, &mut ctx, msg.payload()).await {
+                        if let Err(e) = state_store.lock().await.set(&state_namespace, key, state.clone()).await {
+                            panic!("Error updating state store on topic {}: {:?}", msg.topic(), e);
+                        }
                     }
 
-                    // let stream_consumer = stream_consumer.clone();
                     let msg_topic = msg.topic().to_string();
                     let msg_offset = msg.offset();
 

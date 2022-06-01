@@ -1,10 +1,15 @@
-use serde::Serialize;
+use std::sync::Arc;
 
-pub struct Context<T = ()> {
+use serde::Serialize;
+use tokio::sync::Mutex;
+
+use crate::state_store::StateStore;
+
+pub struct Context<TStore, T = ()> {
     key: String,
     original_state: Option<T>,
-    new_state: Option<T>,
     sends: Vec<FutureDeliverableMessage>,
+    state_store: Arc<Mutex<TStore>>,
 }
 
 #[derive(Clone)]
@@ -14,17 +19,17 @@ pub struct FutureDeliverableMessage {
     pub payload: Vec<u8>,
 }
 
-impl<T> Context<T>
+impl<TStore, T> Context<TStore, T>
 where
     T: Clone,
+    TStore: StateStore<T>
 {
-    pub fn new(key: &str, state: Option<T>) -> Self {
+    pub fn new(key: &str, state: Option<T>, state_store: Arc<Mutex<TStore>>) -> Self {
         Self {
             key: key.to_string(),
             original_state: state,
-            new_state: None,
             sends: vec![],
-            // deserializers: HashMap::new(),
+            state_store,
         }
     }
 
@@ -32,16 +37,12 @@ where
         &self.key
     }
 
+    pub fn state_store(&self) -> Arc<Mutex<TStore>> {
+        self.state_store.clone()
+    }
+
     pub fn get_state(&self) -> &Option<T> {
         &self.original_state
-    }
-
-    pub fn get_new_state(&self) -> &Option<T> {
-        &self.new_state
-    }
-
-    pub fn set_state(&mut self, state: Option<T>) {
-        self.new_state = state
     }
 
     pub fn emit<M: Serialize>(&mut self, topic: &str, key: &str, msg: &M) {
