@@ -142,13 +142,13 @@ mod tests {
 
         let lock = state_store.lock().await;
 
-        let final_state: &ClicksPerUser = lock.get("a").unwrap();
+        let final_state: &ClicksPerUser = lock.get("clicks::a").unwrap();
         assert_eq!(final_state.clicks, 110000);
 
-        let final_state: &ClicksPerUser = lock.get("b").unwrap();
+        let final_state: &ClicksPerUser = lock.get("clicks::b").unwrap();
         assert_eq!(final_state.clicks, 10000);
 
-        let final_state: &ClicksPerUser = lock.get("c").unwrap();
+        let final_state: &ClicksPerUser = lock.get("clicks::c").unwrap();
         assert_eq!(final_state.clicks, 1);
     }
 }
