@@ -46,12 +46,24 @@ pub trait PartitionHelper: Send + Clone {
     fn store_offset(&mut self, topic: &str, offset: i64) -> KafkaResult<()>;
 }
 
+#[derive(Debug, thiserror::Error)]
+pub enum EnsureCopartitionedError {
+    #[error("Connection to kafka broker failed")]
+    ConnectionFailure,
+
+    #[error("No topics found in broker")]
+    NoTopics,
+
+    #[error("Topics are not copartitioned: {0:?}")]
+    NotCopartitioned(Vec<(String, usize)>),
+}
+
 pub trait KafkaProcessorImplementor: Send {
     type PartitionHelperType: PartitionHelper + Sync;
 
     fn subscribe_inputs(&mut self, input_topics: &HashSet<String>) -> Result<(), ()>;
 
-    fn ensure_copartitioned(&mut self) -> Result<usize, ()>;
+    fn ensure_copartitioned(&mut self) -> Result<usize, EnsureCopartitionedError>;
 
     fn create_partitioned_consumer(&self, partition: i32) -> Self::PartitionHelperType;
 
@@ -150,11 +162,11 @@ impl KafkaProcessorImplementor for KafkaProcessorHelper {
         })
     }
 
-    fn ensure_copartitioned(&mut self) -> Result<usize, ()> {
+    fn ensure_copartitioned(&mut self) -> Result<usize, EnsureCopartitionedError> {
         let shit = self
             .stream_consumer
-            .fetch_metadata(None, Duration::from_secs(1))
-            .unwrap();
+            .fetch_metadata(None, Duration::from_secs(5))
+            .map_err(|_| EnsureCopartitionedError::ConnectionFailure)?;
 
         let topics_partitions: Vec<(String, usize)> = shit
             .topics()
@@ -164,14 +176,14 @@ impl KafkaProcessorImplementor for KafkaProcessorHelper {
             .collect();
 
         if topics_partitions.is_empty() {
-            Err(())
+            Err(EnsureCopartitionedError::NoTopics)
         } else if topics_partitions
             .iter()
             .all(|(_, partitions)| partitions.eq(&topics_partitions[0].1))
         {
             Ok(topics_partitions[0].1)
         } else {
-            Err(())
+            Err(EnsureCopartitionedError::NotCopartitioned(topics_partitions))
         }
     }
 }

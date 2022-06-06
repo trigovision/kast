@@ -155,7 +155,7 @@ impl PartitionHelper for TestsPartitionProcessor {
 
 use crate::{
     encoders::{Decoder, Encoder},
-    processor_helper::{IntoKafkaStream, KafkaProcessorImplementor, PartitionHelper},
+    processor_helper::{IntoKafkaStream, KafkaProcessorImplementor, PartitionHelper, EnsureCopartitionedError},
 };
 impl KafkaProcessorImplementor for TestsProcessorHelper {
     type PartitionHelperType = TestsPartitionProcessor;
@@ -199,7 +199,7 @@ impl KafkaProcessorImplementor for TestsProcessorHelper {
         })
     }
 
-    fn ensure_copartitioned(&mut self) -> Result<usize, ()> {
+    fn ensure_copartitioned(&mut self) -> Result<usize, EnsureCopartitionedError> {
         Ok(1)
     }
 }

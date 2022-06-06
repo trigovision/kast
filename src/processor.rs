@@ -69,7 +69,7 @@ where
             .subscribe_inputs(&input_topcis_set)
             .unwrap();
 
-        let num_partitions = self.helper.ensure_copartitioned().unwrap();
+        let num_partitions = self.helper.ensure_copartitioned().expect("Not copartitioned");
 
         let partitions_barrier = Arc::new(Barrier::new(num_partitions + 1));
         for partition in 0..num_partitions as i32 {
