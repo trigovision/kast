@@ -60,7 +60,7 @@ where
         }
     }
 
-    pub async fn start(&mut self) {
+    pub async fn run_forever(mut self) {
         let input_topcis_set: HashSet<String> = self.inputs.keys().cloned().collect();
         let output_topics_set: HashSet<String> =
             self.outputs.iter().map(|o| o.topic().to_string()).collect();
@@ -147,9 +147,6 @@ where
         }
 
         partitions_barrier.wait().await;
-    }
-
-    pub async fn join(self) {
         self.helper
             .wait_to_finish()
             .await

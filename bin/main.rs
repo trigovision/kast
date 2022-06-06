@@ -71,7 +71,7 @@ async fn main() {
         .set("max.poll.interval.ms", "1500")
         .clone();
 
-    let mut p = Processor::new(
+    let p = Processor::new(
         "clicks",
         KafkaProcessorHelper::new(settings),
         vec![
@@ -83,8 +83,7 @@ async fn main() {
         || (),
     );
 
-    p.start().await;
-    p.join().await
+    p.run_forever().await;
 }
 
 #[cfg(test)]
@@ -108,7 +107,7 @@ mod tests {
         let mut in1 = t.input("c1".to_string(), JsonDecoder::new());
         let mut in2 = t.input("c2".to_string(), JsonDecoder::new());
 
-        let mut p = Processor::new(
+        let p = Processor::new(
             "clicks",
             t,
             vec![
@@ -119,8 +118,6 @@ mod tests {
             move || state_store_clone,
             || (),
         );
-
-        p.start().await;
 
         for _i in 0..100000 {
             in1.send("a".to_string(), &Click {}).await.unwrap();
@@ -138,7 +135,7 @@ mod tests {
             .await
             .unwrap();
 
-        p.join().await;
+        p.run_forever().await;
 
         let lock = state_store.lock().await;
 
