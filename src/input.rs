@@ -33,9 +33,9 @@ impl<R, S, F, E, VArgs> Input<R, S, F, E, VArgs>
 where
     E: Decoder<In = R>,
 {
-    pub fn new(topic: String, encoder: E, callback: F) -> Box<Self> {
+    pub fn new(topic: &str, encoder: E, callback: F) -> Box<Self> {
         Box::new(Input {
-            topic,
+            topic: topic.to_string(),
             encoder,
             callback,
             _marker: PhantomData,
