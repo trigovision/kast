@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{sync::Arc, collections::HashMap};
 
 use serde::Serialize;
 use tokio::sync::Mutex;
@@ -17,6 +17,7 @@ pub struct FutureDeliverableMessage {
     pub topic: String,
     pub key: String,
     pub payload: Vec<u8>,
+    pub headers: HashMap<String, String>,
 }
 
 impl<TStore, T> Context<TStore, T>
@@ -45,13 +46,14 @@ where
         &self.original_state
     }
 
-    pub fn emit<M: Serialize>(&mut self, topic: &str, key: &str, msg: &M) {
+    pub fn emit<M: Serialize>(&mut self, topic: &str, key: &str, msg: &M, headers: HashMap<String, String>) {
         // let output = self.deserializers.get(topic).unwrap();
         let data = serde_json::to_vec(msg).unwrap();
         self.sends.push(FutureDeliverableMessage {
             topic: topic.to_string(),
             key: key.to_string(),
             payload: data,
+            headers,
         });
     }
 

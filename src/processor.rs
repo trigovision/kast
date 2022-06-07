@@ -5,7 +5,7 @@ use std::{
 };
 
 use futures::{future::join_all, stream::select_all, StreamExt};
-use rdkafka::{producer::FutureRecord, Message};
+use rdkafka::{producer::FutureRecord, Message, message::{OwnedHeaders, Headers}};
 use tokio::sync::{Barrier, Mutex};
 
 use crate::{
@@ -111,7 +111,7 @@ where
                     let mut ctx = Context::new(key, state, Arc::clone(&state_store));
 
                     let handler = inputs.get(msg.topic()).expect("streams are created from inputs keys");
-                    if let Some(state) = handler.handle(&mut extra_state, &mut ctx, msg.payload()).await {
+                    if let Some(state) = handler.handle(&mut extra_state, &mut ctx, msg.payload(), get_headers(&msg)).await {
                         if let Err(e) = state_store.lock().await.set(&state_namespace, key, state.clone()).await {
                             panic!("Error updating state store on topic {}: {:?}", msg.topic(), e);
                         }
@@ -125,7 +125,7 @@ where
                     let sends = ctx.to_send().into_iter().map(move |s| {
                         assert!(output_topics_set.contains(&s.topic)); //TODO: Should we remove this assertion?
                         helper_clone
-                            .send_result(FutureRecord::to(&s.topic).key(&s.key).payload(&s.payload))
+                            .send_result(FutureRecord::to(&s.topic).key(&s.key).payload(&s.payload).headers(make_owned_headers(s.headers)))
                             .unwrap()
                     }); 
 
@@ -153,4 +153,29 @@ where
             .unwrap()
             .unwrap();
     }
+}
+
+fn get_headers(message: &impl Message) -> HashMap<String, String> {
+    let mut result = HashMap::new();
+
+    if let Some(headers) = message.headers() {
+        for (k, v) in (0..headers.count())
+            .filter_map(|i| headers.get(i))
+            .map(|(k, v)| (k.to_string(), String::from_utf8_lossy(v).to_string()))
+        {
+            result.insert(k, v);
+        }
+    }
+
+    result
+}
+
+fn make_owned_headers(headers: HashMap<String, String>) -> OwnedHeaders {
+    let mut result = OwnedHeaders::new();
+
+    for (k, v) in headers.into_iter() {
+        result = result.add(&k, &v);
+    }
+
+    result
 }

@@ -21,11 +21,12 @@ struct ClicksPerUser {
     clicks: u32,
 }
 
-fn json_encoder<T: DeserializeOwned>(data: Option<&[u8]>) -> T {
-    serde_json::from_slice(data.expect("empty message")).unwrap()
-}
-
-async fn handle_click<TStore>(ctx: &mut Context<TStore, ClicksPerUser>, _click: Click) -> Option<ClicksPerUser>
+async fn handle_click<TStore>(
+    _settings: &mut (),
+    ctx: &mut Context<TStore, ClicksPerUser>,
+    _click: Click,
+    _headers: HashMap<String, String>,
+) -> Option<ClicksPerUser>
 where
     TStore: StateStore<ClicksPerUser>,
 {
@@ -40,13 +41,18 @@ where
     Some(clicks_per_user)
 }
 
-async fn re_emit_clicks<TStore>(ctx: &mut Context<TStore, ClicksPerUser>, click: Click2) -> Option<ClicksPerUser>
+async fn re_emit_clicks<TStore>(
+    _settings: &mut (),
+    ctx: &mut Context<TStore, ClicksPerUser>,
+    click: Click2,
+    _headers: HashMap<String, String>,
+) -> Option<ClicksPerUser>
 where
     TStore: StateStore<ClicksPerUser>,
 {
     let key = ctx.key().to_string();
     for _ in 0..click.clicks {
-        ctx.emit("c1", &key, &Click {})
+        ctx.emit("c1", &key, &Click {}, Default::default())
     }
 
     None
