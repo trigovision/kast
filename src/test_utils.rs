@@ -72,13 +72,13 @@ impl TestsProcessorHelper {
 }
 
 impl TestsProcessorHelper {
-    pub fn input<F, T>(&mut self, topic: String, decoder: F) -> Sender<T, F>
+    pub fn input<F, T>(&mut self, topic: &str, decoder: F) -> Sender<T, F>
     where
         F: Encoder,
         T: Serialize,
     {
-        let input = self.topics.get_mut(&topic).unwrap();
-        Sender::new(topic, decoder, input.ch_tx.clone(), input.sent.clone())
+        let input = self.topics.get_mut(topic).unwrap();
+        Sender::new(topic.to_string(), decoder, input.ch_tx.clone(), input.sent.clone())
     }
 
     pub fn output<E, T>(&mut self, topic: String, encoder: E) -> Receiver<T, E>

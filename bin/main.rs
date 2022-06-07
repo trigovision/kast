@@ -1,11 +1,11 @@
 use std::{collections::HashMap, sync::Arc};
 
 use kast::{
-    context::Context, encoders::JsonEncoder, input::Input, output::Output, processor::Processor,
+    context::Context, encoders::JsonDecoder, input::Input, output::Output, processor::Processor,
     processor_helper::KafkaProcessorHelper, state_store::StateStore,
 };
 use rdkafka::ClientConfig;
-use serde::{de::DeserializeOwned, Deserialize, Serialize};
+use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -75,10 +75,10 @@ async fn main() {
         "clicks",
         KafkaProcessorHelper::new(settings),
         vec![
-            Input::new("c1".to_string(), json_encoder, handle_click),
-            Input::new("c2".to_string(), JsonEncoder::new(), re_emit_clicks),
+            Input::new("c1", JsonDecoder::new(), handle_click),
+            Input::new("c2", JsonDecoder::new(), re_emit_clicks),
         ],
-        vec![Output::new("c1".to_string())],
+        vec![Output::new("c1")],
         || Arc::new(Mutex::new(HashMap::<String, ClicksPerUser>::new())),
         || (),
     );
@@ -89,9 +89,9 @@ async fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::{collections::HashMap};
+    use std::collections::HashMap;
 
-    use crate::{handle_click, json_encoder, re_emit_clicks, Click, Click2, ClicksPerUser};
+    use crate::{handle_click, re_emit_clicks, Click, Click2, ClicksPerUser};
     use kast::{
         encoders::{JsonDecoder, JsonEncoder},
         test_utils::TestsProcessorHelper,
@@ -104,17 +104,17 @@ mod tests {
         let mut t = TestsProcessorHelper::new(vec!["c1", "c2", "c3"]);
         let state_store = Arc::new(Mutex::new(HashMap::new()));
         let state_store_clone = state_store.clone();
-        let mut in1 = t.input("c1".to_string(), JsonDecoder::new());
-        let mut in2 = t.input("c2".to_string(), JsonDecoder::new());
+        let mut in1 = t.input("c1", JsonEncoder::new());
+        let mut in2 = t.input("c2", JsonEncoder::new());
 
         let p = Processor::new(
             "clicks",
             t,
             vec![
-                Input::new("c1".to_string(), json_encoder, handle_click),
-                Input::new("c2".to_string(), JsonEncoder::new(), re_emit_clicks),
+                Input::new("c1", JsonDecoder::new(), handle_click),
+                Input::new("c2", JsonDecoder::new(), re_emit_clicks),
             ],
-            vec![Output::new("c1".to_string())],
+            vec![Output::new("c1")],
             move || state_store_clone,
             || (),
         );
