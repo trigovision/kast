@@ -74,7 +74,7 @@ impl TestsProcessorHelper {
 impl TestsProcessorHelper {
     pub fn input<F, T>(&mut self, topic: String, decoder: F) -> Sender<T, F>
     where
-        F: Decoder,
+        F: Encoder,
         T: Serialize,
     {
         let input = self.topics.get_mut(&topic).unwrap();
@@ -83,7 +83,7 @@ impl TestsProcessorHelper {
 
     pub fn output<E, T>(&mut self, topic: String, encoder: E) -> Receiver<T, E>
     where
-        E: Encoder<In = T>,
+        E: Decoder<In = T>,
     {
         let output = self.topics.get_mut(&topic).unwrap();
         Receiver::new(encoder, output.ch_tx.subscribe())
@@ -154,7 +154,7 @@ impl PartitionHelper for TestsPartitionProcessor {
 }
 
 use crate::{
-    encoders::{Decoder, Encoder},
+    encoders::{Encoder, Decoder},
     processor_helper::{IntoKafkaStream, KafkaProcessorImplementor, PartitionHelper, EnsureCopartitionedError},
 };
 impl KafkaProcessorImplementor for TestsProcessorHelper {
@@ -207,7 +207,7 @@ impl KafkaProcessorImplementor for TestsProcessorHelper {
 //Should we use with flat map on channels?
 pub struct Sender<T, F>
 where
-    F: Decoder,
+    F: Encoder,
 {
     topic: String,
     decoder: F,
@@ -218,7 +218,7 @@ where
 
 impl<T, F> Sender<T, F>
 where
-    F: Decoder,
+    F: Encoder,
     T: Serialize,
 {
     fn new(
@@ -256,7 +256,7 @@ where
 
 pub struct Receiver<T, E>
 where
-    E: Encoder<In = T>,
+    E: Decoder<In = T>,
 {
     encoder: E,
     rx: tokio::sync::broadcast::Receiver<OwnedMessage>,
@@ -264,7 +264,7 @@ where
 
 impl<T, E> Receiver<T, E>
 where
-    E: Encoder<In = T>,
+    E: Decoder<In = T>,
 {
     fn new(encoder: E, rx: tokio::sync::broadcast::Receiver<OwnedMessage>) -> Self {
         Self { encoder, rx }

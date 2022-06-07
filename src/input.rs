@@ -1,4 +1,4 @@
-use crate::{context::Context, encoders::Encoder};
+use crate::{context::Context, encoders::Decoder};
 use dyn_clone::DynClone;
 use futures::Future;
 use serde::de::DeserializeOwned;
@@ -20,7 +20,7 @@ pub trait Handler<'a, T, S, R, TStore, VArgs> {
 #[derive(Clone)]
 pub struct Input<R, S, F, E, VArgs>
 where
-    E: Encoder<In = R>,
+    E: Decoder<In = R>,
 {
     topic: String,
     encoder: E,
@@ -30,7 +30,7 @@ where
 
 impl<R, S, F, E, VArgs> Input<R, S, F, E, VArgs>
 where
-    E: Encoder<In = R>,
+    E: Decoder<In = R>,
 {
     pub fn new(topic: String, encoder: E, callback: F) -> Box<Self> {
         Box::new(Input {
@@ -46,7 +46,7 @@ where
 impl<R, T, S, F, E, TStore, VArgs> GenericInput<T, S, TStore> for Input<R, S, F, E, VArgs>
 where
     for<'a> F: Handler<'a, T, S, R, TStore, VArgs> + Send + Sync + Copy,
-    E: Encoder<In = R> + Sync + Clone + Send + 'static,
+    E: Decoder<In = R> + Sync + Clone + Send + 'static,
     R: Sync + Send + Clone + DeserializeOwned + 'static + std::fmt::Debug,
     T: Clone + Send + Sync + 'static,
     TStore: Send + Sync,

@@ -1,13 +1,13 @@
 use serde::{de::DeserializeOwned, Serialize};
 use std::marker::PhantomData;
 
-pub trait Encoder {
+pub trait Decoder {
     type In;
 
     fn encode(&self, data: Option<&[u8]>) -> Self::In;
 }
 
-impl<T, F> Encoder for F
+impl<T, F> Decoder for F
 where
     F: FnOnce(Option<&[u8]>) -> T + Copy,
 {
@@ -18,7 +18,7 @@ where
     }
 }
 
-pub trait Decoder {
+pub trait Encoder {
     fn decode<T>(&self, data: &T) -> Vec<u8>
     where
         T: Serialize;
@@ -38,11 +38,11 @@ pub trait Decoder {
 // }
 
 #[derive(Clone)]
-pub struct JsonEncoder<T> {
+pub struct JsonDecoder<T> {
     _marker: PhantomData<T>,
 }
 
-impl<T> JsonEncoder<T> {
+impl<T> JsonDecoder<T> {
     pub fn new() -> Self {
         Self {
             _marker: PhantomData,
@@ -50,13 +50,13 @@ impl<T> JsonEncoder<T> {
     }
 }
 
-impl<T> Default for JsonEncoder<T> {
+impl<T> Default for JsonDecoder<T> {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl<T> Encoder for JsonEncoder<T>
+impl<T> Decoder for JsonDecoder<T>
 where
     T: DeserializeOwned,
 {
@@ -67,19 +67,19 @@ where
     }
 }
 
-pub struct JsonDecoder {}
-impl JsonDecoder {
+pub struct JsonEncoder {}
+impl JsonEncoder {
     pub fn new() -> Self {
         Self {}
     }
 }
 
-impl Default for JsonDecoder {
+impl Default for JsonEncoder {
     fn default() -> Self {
         Self::new()
     }
 }
-impl Decoder for JsonDecoder {
+impl Encoder for JsonEncoder {
     fn decode<T>(&self, data: &T) -> Vec<u8>
     where
         T: Serialize,
