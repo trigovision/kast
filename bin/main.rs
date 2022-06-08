@@ -61,7 +61,7 @@ where
 //TODO: Support outputs
 //TODO: Support different state stores which arent hashmaps
 #[tokio::main]
-async fn main() {
+async fn main() -> Result<(), String> {
     let settings = ClientConfig::new()
         .set("bootstrap.servers", "localhost:9092")
         .set("partitioner", "murmur2")
@@ -77,7 +77,7 @@ async fn main() {
         .set("max.poll.interval.ms", "1500")
         .clone();
 
-    let p = Processor::new(
+    let mut p = Processor::new(
         "clicks",
         KafkaProcessorHelper::new(settings),
         vec![
@@ -89,7 +89,7 @@ async fn main() {
         || (),
     );
 
-    p.run_forever().await;
+    p.run_forever().await
 }
 
 #[cfg(test)]
@@ -113,7 +113,7 @@ mod tests {
         let mut in1 = t.input("c1", JsonEncoder::new());
         let mut in2 = t.input("c2", JsonEncoder::new());
 
-        let p = Processor::new(
+        let mut p = Processor::new(
             "clicks",
             t,
             vec![
@@ -124,6 +124,9 @@ mod tests {
             move || state_store_clone,
             || (),
         );
+
+        // We must run the processor before sending inputs, otherwise they will not reach the processor
+        p.run_forever().await.unwrap();
 
         for _i in 0..100000 {
             in1.send("a".to_string(), &Click {}).await.unwrap();
@@ -141,7 +144,7 @@ mod tests {
             .await
             .unwrap();
 
-        p.run_forever().await;
+        p.join().await.unwrap();
 
         let lock = state_store.lock().await;
 

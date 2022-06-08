@@ -9,7 +9,14 @@ use std::{
     time::Duration,
 };
 
-use futures::{Stream, StreamExt};
+use crate::{
+    encoders::{Decoder, Encoder},
+    processor_helper::{
+        EnsureCopartitionedError, IntoKafkaStream, KafkaProcessorImplementor, PartitionHelper,
+    },
+};
+use async_stream::stream;
+use futures::Stream;
 use rdkafka::{
     error::{KafkaError, KafkaResult},
     message::{OwnedMessage, ToBytes},
@@ -17,38 +24,23 @@ use rdkafka::{
     Message,
 };
 use serde::Serialize;
-use tokio::{sync::broadcast::error::SendError, time::sleep};
-use tokio_stream::wrappers::{errors::BroadcastStreamRecvError, BroadcastStream};
 
+#[derive(Clone)]
 pub struct TopicTestHelper {
-    ch_tx: tokio::sync::broadcast::Sender<OwnedMessage>,
+    ch_tx: async_channel::Sender<OwnedMessage>,
     sent: Arc<AtomicU32>,
     recv: Arc<AtomicU32>,
     input: bool,
-    // Note: we store _ch_rx so sends to a channel which isn't input
-    // Wont panic when there are no subscribers
-    _ch_rx: tokio::sync::broadcast::Receiver<OwnedMessage>,
-}
-
-impl Clone for TopicTestHelper {
-    fn clone(&self) -> Self {
-        Self {
-            ch_tx: self.ch_tx.clone(),
-            _ch_rx: self.ch_tx.subscribe(),
-            sent: self.sent.clone(),
-            recv: self.recv.clone(),
-            input: self.input,
-        }
-    }
+    ch_rx: async_channel::Receiver<OwnedMessage>,
 }
 
 impl Default for TopicTestHelper {
     fn default() -> Self {
-        let (tx, rx) = tokio::sync::broadcast::channel(1_000_000);
+        let (tx, rx) = async_channel::bounded(1_000_000);
 
         Self {
             ch_tx: tx,
-            _ch_rx: rx,
+            ch_rx: rx,
             sent: Default::default(),
             recv: Default::default(),
             input: false,
@@ -56,6 +48,7 @@ impl Default for TopicTestHelper {
     }
 }
 
+#[derive(Clone)]
 pub struct TestsProcessorHelper {
     topics: HashMap<String, TopicTestHelper>,
 }
@@ -78,7 +71,12 @@ impl TestsProcessorHelper {
         T: Serialize,
     {
         let input = self.topics.get_mut(topic).unwrap();
-        Sender::new(topic.to_string(), decoder, input.ch_tx.clone(), input.sent.clone())
+        Sender::new(
+            topic.to_string(),
+            decoder,
+            input.ch_tx.clone(),
+            input.sent.clone(),
+        )
     }
 
     pub fn output<E, T>(&mut self, topic: String, encoder: E) -> Receiver<T, E>
@@ -86,7 +84,7 @@ impl TestsProcessorHelper {
         E: Decoder<In = T>,
     {
         let output = self.topics.get_mut(&topic).unwrap();
-        Receiver::new(encoder, output.ch_tx.subscribe())
+        Receiver::new(encoder, output.ch_rx.clone())
     }
 }
 
@@ -95,27 +93,27 @@ pub struct TestsPartitionProcessor {
     topics: HashMap<String, TopicTestHelper>,
 }
 
-impl IntoKafkaStream for tokio::sync::broadcast::Sender<OwnedMessage> {
-    type Error = BroadcastStreamRecvError;
+impl IntoKafkaStream for TopicTestHelper {
+    type Error = async_channel::RecvError;
 
     fn stream<'a>(
         &'a self,
     ) -> Pin<Box<dyn Stream<Item = Result<OwnedMessage, Self::Error>> + Send + 'a>> {
-        BroadcastStream::new(self.subscribe()).boxed()
+        Box::pin(stream! {
+            loop {
+                yield self.ch_rx.recv().await
+            }
+        })
     }
 }
 
 impl PartitionHelper for TestsPartitionProcessor {
     type DeliveryFutureType = Pin<Box<dyn futures::Future<Output = ()> + Send>>;
-    type Error = BroadcastStreamRecvError;
-    type OwnedStreamableType = tokio::sync::broadcast::Sender<OwnedMessage>;
+    type Error = async_channel::RecvError;
+    type OwnedStreamableType = TopicTestHelper;
 
-    fn create_partitioned_topic_stream(
-        &self,
-        topic_name: &str,
-    ) -> tokio::sync::broadcast::Sender<OwnedMessage> {
-        let rec = self.topics.get(topic_name).unwrap();
-        rec.ch_tx.clone()
+    fn create_partitioned_topic_stream(&self, topic_name: &str) -> Self::OwnedStreamableType {
+        self.topics.get(topic_name).unwrap().clone()
     }
 
     fn send_result<'a, K, P>(
@@ -138,8 +136,9 @@ impl PartitionHelper for TestsPartitionProcessor {
 
         let rec = self.topics.get(record.topic).unwrap();
         rec.sent.fetch_add(1, Ordering::Relaxed);
-        rec.ch_tx.send(msg).unwrap();
-        Ok(Box::pin(async move {}))
+        
+        let ch_tx_clone = rec.ch_tx.clone();
+        Ok(Box::pin(async move { ch_tx_clone.send(msg).await.unwrap(); }))
     }
 
     fn store_offset(&mut self, topic: &str, _offset: i64) -> KafkaResult<()> {
@@ -153,10 +152,7 @@ impl PartitionHelper for TestsPartitionProcessor {
     }
 }
 
-use crate::{
-    encoders::{Encoder, Decoder},
-    processor_helper::{IntoKafkaStream, KafkaProcessorImplementor, PartitionHelper, EnsureCopartitionedError},
-};
+#[async_trait::async_trait]
 impl KafkaProcessorImplementor for TestsProcessorHelper {
     type PartitionHelperType = TestsPartitionProcessor;
 
@@ -175,28 +171,31 @@ impl KafkaProcessorImplementor for TestsProcessorHelper {
         }
     }
 
-    fn wait_to_finish(self) -> tokio::task::JoinHandle<Result<(), String>> {
-        tokio::spawn(async move {
-            // TODO: This is ugly and we can implement better "wait" mechanism
-            // TODO: Support output topics where we don't receive every message, only if it's inputs
-            loop {
-                if self
-                    .topics
-                    .iter()
-                    .filter(|(_, t)| t.input)
-                    .all(|(_t, stats)| {
-                        let r = stats.recv.load(Ordering::Relaxed);
-                        let s = stats.sent.load(Ordering::Relaxed);
-                        s == r
-                    })
-                {
-                    break;
-                }
-                sleep(Duration::from_nanos(0)).await;
-            }
+    async fn start(&self) -> Result<(), String> {
+        Ok(())
+    }
 
-            Ok(())
-        })
+    async fn wait_to_finish(&self) -> Result<(), String> {
+        // TODO: This is ugly and we can implement better "wait" mechanism
+        // TODO: Support output topics where we don't receive every message, only if it's inputs
+        loop {
+            if self
+                .topics
+                .iter()
+                .filter(|(_, t)| t.input)
+                .all(|(_t, stats)| {
+                    let r = stats.recv.load(Ordering::Relaxed);
+                    let s = stats.sent.load(Ordering::Relaxed);
+                    println!("{} {} {}", _t, s, r);
+                    s == r && r != 0
+                })
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+
+        Ok(())
     }
 
     fn ensure_copartitioned(&mut self) -> Result<usize, EnsureCopartitionedError> {
@@ -211,7 +210,7 @@ where
 {
     topic: String,
     decoder: F,
-    tx: tokio::sync::broadcast::Sender<OwnedMessage>,
+    tx: async_channel::Sender<OwnedMessage>,
     sem: Arc<AtomicU32>,
     _marker: PhantomData<T>,
 }
@@ -224,7 +223,7 @@ where
     fn new(
         topic: String,
         decoder: F,
-        tx: tokio::sync::broadcast::Sender<OwnedMessage>,
+        tx: async_channel::Sender<OwnedMessage>,
         sem: Arc<AtomicU32>,
     ) -> Self {
         Self {
@@ -236,7 +235,11 @@ where
         }
     }
 
-    pub async fn send(&mut self, key: String, msg: &T) -> Result<usize, SendError<OwnedMessage>> {
+    pub async fn send(
+        &mut self,
+        key: String,
+        msg: &T,
+    ) -> Result<(), async_channel::SendError<OwnedMessage>> {
         let data = self.decoder.decode(msg);
         let msg = OwnedMessage::new(
             Some(data),
@@ -250,7 +253,7 @@ where
 
         self.sem.fetch_add(1, Ordering::Relaxed);
 
-        self.tx.send(msg)
+        self.tx.send(msg).await
     }
 }
 
@@ -259,23 +262,23 @@ where
     E: Decoder<In = T>,
 {
     encoder: E,
-    rx: tokio::sync::broadcast::Receiver<OwnedMessage>,
+    rx: async_channel::Receiver<OwnedMessage>,
 }
 
 impl<T, E> Receiver<T, E>
 where
     E: Decoder<In = T>,
 {
-    fn new(encoder: E, rx: tokio::sync::broadcast::Receiver<OwnedMessage>) -> Self {
+    fn new(encoder: E, rx: async_channel::Receiver<OwnedMessage>) -> Self {
         Self { encoder, rx }
     }
 
-    pub async fn recv(&mut self) -> Result<T, tokio::sync::broadcast::error::RecvError> {
+    pub async fn recv(&mut self) -> Result<T, async_channel::RecvError> {
         let data = self.rx.recv().await;
         data.map(|d| self.encoder.encode(d.payload()))
     }
 
-    pub fn try_recv(&mut self) -> Result<T, tokio::sync::broadcast::error::TryRecvError> {
+    pub fn try_recv(&mut self) -> Result<T, async_channel::TryRecvError> {
         let data = self.rx.try_recv();
         data.map(|d| self.encoder.encode(d.payload()))
     }

@@ -58,6 +58,7 @@ pub enum EnsureCopartitionedError {
     NotCopartitioned(Vec<(String, usize)>),
 }
 
+#[async_trait::async_trait]
 pub trait KafkaProcessorImplementor: Send {
     type PartitionHelperType: PartitionHelper + Sync;
 
@@ -67,7 +68,13 @@ pub trait KafkaProcessorImplementor: Send {
 
     fn create_partitioned_consumer(&self, partition: i32) -> Self::PartitionHelperType;
 
-    fn wait_to_finish(self) -> tokio::task::JoinHandle<Result<(), String>>;
+    /// Kafka requires us to recv() on the main stream consumer in order for partition queues to receive messages,
+    /// which is an implementation detail that does not play well with the streaming abstractions.
+    /// To cope, we put that kind of special logic in this function.
+    async fn start(&self) -> Result<(), String>;
+
+    /// This function is only relevant for testing - in real applications, the processor never finishes.
+    async fn wait_to_finish(&self) -> Result<(), String>;
 }
 
 pub struct KafkaProcessorHelper {
@@ -125,6 +132,7 @@ impl PartitionHelper for KafkaPartitionProcessor {
     }
 }
 
+#[async_trait::async_trait]
 impl KafkaProcessorImplementor for KafkaProcessorHelper {
     type PartitionHelperType = KafkaPartitionProcessor;
 
@@ -151,15 +159,17 @@ impl KafkaProcessorImplementor for KafkaProcessorHelper {
         }
     }
 
-    fn wait_to_finish(self) -> tokio::task::JoinHandle<Result<(), String>> {
-        tokio::spawn(async move {
-            let message = self.stream_consumer.recv().await;
-            let err = format!(
-                "main stream consumer queue unexpectedly received message: {:?}",
-                message
-            );
-            Err(err)
-        })
+    async fn start(&self) -> Result<(), String> {
+        let message = self.stream_consumer.recv().await;
+        let err = format!(
+            "main stream consumer queue unexpectedly received message: {:?}",
+            message
+        );
+        Err(err)
+    }
+
+    async fn wait_to_finish(&self) -> Result<(), String> {
+        panic!("Cannot wait for a kafka processor to finish")
     }
 
     fn ensure_copartitioned(&mut self) -> Result<usize, EnsureCopartitionedError> {
@@ -183,7 +193,9 @@ impl KafkaProcessorImplementor for KafkaProcessorHelper {
         {
             Ok(topics_partitions[0].1)
         } else {
-            Err(EnsureCopartitionedError::NotCopartitioned(topics_partitions))
+            Err(EnsureCopartitionedError::NotCopartitioned(
+                topics_partitions,
+            ))
         }
     }
 }

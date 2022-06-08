@@ -11,7 +11,11 @@ crate-type = ["lib"]
 [[bin]]
 name = "main"
 path = "bin/main.rs"
+required-features = ["testing"]
 
+[features]
+default = []
+testing = ["async-channel"]
 
 [dependencies]
 rdkafka = { version = "0.28", features = ["cmake-build"] }
@@ -38,8 +42,8 @@ google-bigtableadmin2 = "3.0.0"
 # bigtable depends on `yup-oauth2` ^6, but on hyper-rustls==0.22, but `yup-oauth2` 6.6.0 pulls hyper-rustls==0.23 :(
 yup-oauth2 = "=6.5.0"
 thiserror = "1.0.31"
+async-channel = { version = "*", optional = true }
 
 [dev-dependencies]
 rstest = "*"
 tempfile = "*"
-

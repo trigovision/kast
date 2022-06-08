@@ -60,13 +60,13 @@ where
         }
     }
 
-    pub async fn run_forever(mut self) {
-        let input_topcis_set: HashSet<String> = self.inputs.keys().cloned().collect();
+    pub async fn run_forever(&mut self) -> Result<(), String> {
+        let input_topics_set: HashSet<String> = self.inputs.keys().cloned().collect();
         let output_topics_set: HashSet<String> =
             self.outputs.iter().map(|o| o.topic().to_string()).collect();
 
         self.helper
-            .subscribe_inputs(&input_topcis_set)
+            .subscribe_inputs(&input_topics_set)
             .unwrap();
 
         let num_partitions = self.helper.ensure_copartitioned().expect("Not copartitioned");
@@ -98,7 +98,7 @@ where
                     let msg = msg.unwrap();
                     assert_eq!(msg.partition(), partition);
                     
-                    //TODO: Key serializer?
+                    // TODO: Key serializer?
                     let key = std::str::from_utf8(msg.key().unwrap()).unwrap();
 
                     let state = match state_store.lock().await.get(&state_namespace, key).await {
@@ -147,11 +147,11 @@ where
         }
 
         partitions_barrier.wait().await;
-        self.helper
-            .wait_to_finish()
-            .await
-            .unwrap()
-            .unwrap();
+        self.helper.start().await
+    }
+
+    pub async fn join(&self) -> Result<(), String> {
+        self.helper.wait_to_finish().await
     }
 }
 
