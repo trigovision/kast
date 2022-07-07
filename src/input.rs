@@ -19,24 +19,24 @@ pub trait Handler<'a, T, S, R, TStore, VArgs> {
 }
 
 #[derive(Clone)]
-pub struct Input<R, S, F, E, VArgs>
+pub struct Input<R, S, F, D, VArgs>
 where
-    E: Decoder<In = R>,
+    D: Decoder<In = R>,
 {
     topic: String,
-    encoder: E,
+    decoder: D,
     callback: F,
     _marker: PhantomData<(S, VArgs)>,
 }
 
-impl<R, S, F, E, VArgs> Input<R, S, F, E, VArgs>
+impl<R, S, F, D, VArgs> Input<R, S, F, D, VArgs>
 where
-    E: Decoder<In = R>,
+    D: Decoder<In = R>,
 {
-    pub fn new(topic: &str, encoder: E, callback: F) -> Box<Self> {
+    pub fn new(topic: &str, decoder: D, callback: F) -> Box<Self> {
         Box::new(Input {
             topic: topic.to_string(),
-            encoder,
+            decoder,
             callback,
             _marker: PhantomData,
         })
@@ -44,10 +44,10 @@ where
 }
 
 #[async_trait::async_trait]
-impl<R, T, S, F, E, TStore, VArgs> GenericInput<T, S, TStore> for Input<R, S, F, E, VArgs>
+impl<R, T, S, F, D, TStore, VArgs> GenericInput<T, S, TStore> for Input<R, S, F, D, VArgs>
 where
     for<'a> F: Handler<'a, T, S, R, TStore, VArgs> + Send + Sync + Copy,
-    E: Decoder<In = R> + Sync + Clone + Send + 'static,
+    D: Decoder<In = R> + Sync + Clone + Send + 'static,
     R: Sync + Send + Clone + DeserializeOwned + 'static + std::fmt::Debug,
     T: Clone + Send + Sync + 'static,
     TStore: Send + Sync,
@@ -59,7 +59,7 @@ where
     }
 
     async fn handle(&self, state: &mut S, ctx: &mut Context<TStore, T>, data: Option<&[u8]>, headers: HashMap<String, String>) -> Option<T> {
-        let msg = self.encoder.encode(data);
+        let msg = self.decoder.decode(data);
         self.callback.call(state, ctx, msg, headers).await
     }
 }

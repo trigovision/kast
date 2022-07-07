@@ -4,7 +4,7 @@ use std::marker::PhantomData;
 pub trait Decoder {
     type In;
 
-    fn encode(&self, data: Option<&[u8]>) -> Self::In;
+    fn decode(&self, data: Option<&[u8]>) -> Self::In;
 }
 
 impl<T, F> Decoder for F
@@ -13,13 +13,13 @@ where
 {
     type In = T;
 
-    fn encode(&self, data: Option<&[u8]>) -> Self::In {
+    fn decode(&self, data: Option<&[u8]>) -> Self::In {
         (self)(data)
     }
 }
 
 pub trait Encoder {
-    fn decode<T>(&self, data: &T) -> Vec<u8>
+    fn encode<T>(&self, data: &T) -> Vec<u8>
     where
         T: Serialize;
 }
@@ -62,7 +62,7 @@ where
 {
     type In = T;
 
-    fn encode(&self, data: Option<&[u8]>) -> Self::In {
+    fn decode(&self, data: Option<&[u8]>) -> Self::In {
         serde_json::from_slice(data.expect("empty message")).unwrap()
     }
 }
@@ -80,7 +80,7 @@ impl Default for JsonEncoder {
     }
 }
 impl Encoder for JsonEncoder {
-    fn decode<T>(&self, data: &T) -> Vec<u8>
+    fn encode<T>(&self, data: &T) -> Vec<u8>
     where
         T: Serialize,
     {

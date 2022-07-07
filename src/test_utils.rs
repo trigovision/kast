@@ -209,7 +209,7 @@ where
     F: Encoder,
 {
     topic: String,
-    decoder: F,
+    encoder: F,
     tx: async_channel::Sender<OwnedMessage>,
     sem: Arc<AtomicU32>,
     _marker: PhantomData<T>,
@@ -222,13 +222,13 @@ where
 {
     fn new(
         topic: String,
-        decoder: F,
+        encoder: F,
         tx: async_channel::Sender<OwnedMessage>,
         sem: Arc<AtomicU32>,
     ) -> Self {
         Self {
             topic,
-            decoder,
+            encoder,
             tx,
             sem,
             _marker: PhantomData,
@@ -240,7 +240,7 @@ where
         key: String,
         msg: &T,
     ) -> Result<(), async_channel::SendError<OwnedMessage>> {
-        let data = self.decoder.decode(msg);
+        let data = self.encoder.encode(msg);
         let msg = OwnedMessage::new(
             Some(data),
             Some(key.as_bytes().to_vec()),
@@ -257,29 +257,29 @@ where
     }
 }
 
-pub struct Receiver<T, E>
+pub struct Receiver<T, D>
 where
-    E: Decoder<In = T>,
+    D: Decoder<In = T>,
 {
-    encoder: E,
+    decoder: D,
     rx: async_channel::Receiver<OwnedMessage>,
 }
 
-impl<T, E> Receiver<T, E>
+impl<T, D> Receiver<T, D>
 where
-    E: Decoder<In = T>,
+    D: Decoder<In = T>,
 {
-    fn new(encoder: E, rx: async_channel::Receiver<OwnedMessage>) -> Self {
-        Self { encoder, rx }
+    fn new(decoder: D, rx: async_channel::Receiver<OwnedMessage>) -> Self {
+        Self { decoder, rx }
     }
 
     pub async fn recv(&mut self) -> Result<T, async_channel::RecvError> {
         let data = self.rx.recv().await;
-        data.map(|d| self.encoder.encode(d.payload()))
+        data.map(|d| self.decoder.decode(d.payload()))
     }
 
     pub fn try_recv(&mut self) -> Result<T, async_channel::TryRecvError> {
         let data = self.rx.try_recv();
-        data.map(|d| self.encoder.encode(d.payload()))
+        data.map(|d| self.decoder.decode(d.payload()))
     }
 }
