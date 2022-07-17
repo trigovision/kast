@@ -6,8 +6,8 @@ pub struct Output {
 }
 
 impl Output {
-    pub fn new(topic: String) -> Self {
-        Output { topic }
+    pub fn new(topic: &str) -> Self {
+        Output { topic: topic.to_string() }
     }
 
     pub fn topic(&self) -> &str {

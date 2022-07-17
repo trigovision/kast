@@ -1,11 +1,12 @@
-use std::collections::HashMap;
+use std::{collections::HashMap, sync::Arc};
 
 use kast::{
-    context::Context, encoders::JsonEncoder, input::Input, output::Output, processor::Processor,
-    processor_helper::KafkaProcessorHelper,
+    context::Context, encoders::JsonDecoder, input::Input, output::Output, processor::Processor,
+    processor_helper::KafkaProcessorHelper, state_store::StateStore,
 };
 use rdkafka::ClientConfig;
-use serde::{de::DeserializeOwned, Deserialize, Serialize};
+use serde::{Deserialize, Serialize};
+use tokio::sync::Mutex;
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 struct Click {}
@@ -20,11 +21,15 @@ struct ClicksPerUser {
     clicks: u32,
 }
 
-fn json_encoder<T: DeserializeOwned>(data: Option<&[u8]>) -> T {
-    serde_json::from_slice(data.expect("empty message")).unwrap()
-}
-
-async fn handle_click(ctx: &mut Context<ClicksPerUser>, _click: Click) {
+async fn handle_click<TStore>(
+    _settings: &mut (),
+    ctx: &mut Context<TStore, ClicksPerUser>,
+    _click: Click,
+    _headers: HashMap<String, String>,
+) -> Option<ClicksPerUser>
+where
+    TStore: StateStore<ClicksPerUser>,
+{
     let mut clicks_per_user = match ctx.get_state() {
         Some(state) => state.clone(),
         None => ClicksPerUser { clicks: 0 },
@@ -33,20 +38,30 @@ async fn handle_click(ctx: &mut Context<ClicksPerUser>, _click: Click) {
     clicks_per_user.clicks += 1;
     println!("{:?}, {:?}", ctx.key(), clicks_per_user);
 
-    ctx.set_state(Some(clicks_per_user))
+    Some(clicks_per_user)
 }
 
-async fn re_emit_clicks(ctx: &mut Context<ClicksPerUser>, click: Click2) {
+async fn re_emit_clicks<TStore>(
+    _settings: &mut (),
+    ctx: &mut Context<TStore, ClicksPerUser>,
+    click: Click2,
+    _headers: HashMap<String, String>,
+) -> Option<ClicksPerUser>
+where
+    TStore: StateStore<ClicksPerUser>,
+{
     let key = ctx.key().to_string();
     for _ in 0..click.clicks {
-        ctx.emit("c1", &key, &Click {})
+        ctx.emit("c1", &key, &Click {}, Default::default())
     }
+
+    None
 }
 
 //TODO: Support outputs
 //TODO: Support different state stores which arent hashmaps
 #[tokio::main]
-async fn main() {
+async fn main() -> Result<(), String> {
     let settings = ClientConfig::new()
         .set("bootstrap.servers", "localhost:9092")
         .set("partitioner", "murmur2")
@@ -63,57 +78,55 @@ async fn main() {
         .clone();
 
     let mut p = Processor::new(
+        "clicks",
         KafkaProcessorHelper::new(settings),
         vec![
-            Input::new("c1".to_string(), json_encoder, handle_click),
-            Input::new("c2".to_string(), JsonEncoder::new(), re_emit_clicks),
+            Input::new("c1", JsonDecoder::new(), handle_click),
+            Input::new("c2", JsonDecoder::new(), re_emit_clicks),
         ],
-        vec![Output::new("c1".to_string())],
-        HashMap::<String, ClicksPerUser>::new,
+        vec![Output::new("c1")],
+        || Arc::new(Mutex::new(HashMap::<String, ClicksPerUser>::new())),
         || (),
     );
 
-    p.start().await;
-    p.join().await
+    p.run_forever().await
 }
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::HashMap, sync::Arc};
+    use super::*;
+    use std::collections::HashMap;
 
-    use crate::{handle_click, json_encoder, re_emit_clicks, Click, Click2, ClicksPerUser};
+    use crate::{handle_click, re_emit_clicks, Click, Click2, ClicksPerUser};
     use kast::{
         encoders::{JsonDecoder, JsonEncoder},
-        input::Input,
-        output::Output,
-        processor::Processor,
-        state_store::StateStore,
         test_utils::TestsProcessorHelper,
     };
     use rstest::rstest;
-    use tokio::sync::RwLock;
 
     #[rstest]
     #[tokio::test]
     async fn test_single_store() {
         let mut t = TestsProcessorHelper::new(vec!["c1", "c2", "c3"]);
-        let state_store = Arc::new(RwLock::new(HashMap::new()));
+        let state_store = Arc::new(Mutex::new(HashMap::new()));
         let state_store_clone = state_store.clone();
-        let mut in1 = t.input("c1".to_string(), JsonDecoder::new());
-        let mut in2 = t.input("c2".to_string(), JsonDecoder::new());
+        let mut in1 = t.input("c1", JsonEncoder::new());
+        let mut in2 = t.input("c2", JsonEncoder::new());
 
         let mut p = Processor::new(
+            "clicks",
             t,
             vec![
-                Input::new("c1".to_string(), json_encoder, handle_click),
-                Input::new("c2".to_string(), JsonEncoder::new(), re_emit_clicks),
+                Input::new("c1", JsonDecoder::new(), handle_click),
+                Input::new("c2", JsonDecoder::new(), re_emit_clicks),
             ],
-            vec![Output::new("c1".to_string())],
-            move || state_store_clone.clone(),
+            vec![Output::new("c1")],
+            move || state_store_clone,
             || (),
         );
 
-        p.start().await;
+        // We must run the processor before sending inputs, otherwise they will not reach the processor
+        p.run_forever().await.unwrap();
 
         for _i in 0..100000 {
             in1.send("a".to_string(), &Click {}).await.unwrap();
@@ -131,15 +144,17 @@ mod tests {
             .await
             .unwrap();
 
-        p.join().await;
+        p.join().await.unwrap();
 
-        let final_state: ClicksPerUser = state_store.get("a").await.unwrap();
+        let lock = state_store.lock().await;
+
+        let final_state: &ClicksPerUser = lock.get("clicks::a").unwrap();
         assert_eq!(final_state.clicks, 110000);
 
-        let final_state: ClicksPerUser = state_store.get("b").await.unwrap();
+        let final_state: &ClicksPerUser = lock.get("clicks::b").unwrap();
         assert_eq!(final_state.clicks, 10000);
 
-        let final_state: ClicksPerUser = state_store.get("c").await.unwrap();
+        let final_state: &ClicksPerUser = lock.get("clicks::c").unwrap();
         assert_eq!(final_state.clicks, 1);
     }
 }

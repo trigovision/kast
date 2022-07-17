@@ -1,25 +1,25 @@
 use serde::{de::DeserializeOwned, Serialize};
 use std::marker::PhantomData;
 
-pub trait Encoder {
+pub trait Decoder {
     type In;
 
-    fn encode(&self, data: Option<&[u8]>) -> Self::In;
+    fn decode(&self, data: Option<&[u8]>) -> Self::In;
 }
 
-impl<T, F> Encoder for F
+impl<T, F> Decoder for F
 where
     F: FnOnce(Option<&[u8]>) -> T + Copy,
 {
     type In = T;
 
-    fn encode(&self, data: Option<&[u8]>) -> Self::In {
+    fn decode(&self, data: Option<&[u8]>) -> Self::In {
         (self)(data)
     }
 }
 
-pub trait Decoder {
-    fn decode<T>(&self, data: &T) -> Vec<u8>
+pub trait Encoder {
+    fn encode<T>(&self, data: &T) -> Vec<u8>
     where
         T: Serialize;
 }
@@ -38,11 +38,11 @@ pub trait Decoder {
 // }
 
 #[derive(Clone)]
-pub struct JsonEncoder<T> {
+pub struct JsonDecoder<T> {
     _marker: PhantomData<T>,
 }
 
-impl<T> JsonEncoder<T> {
+impl<T> JsonDecoder<T> {
     pub fn new() -> Self {
         Self {
             _marker: PhantomData,
@@ -50,28 +50,72 @@ impl<T> JsonEncoder<T> {
     }
 }
 
-impl<T> Encoder for JsonEncoder<T>
+impl<T> Default for JsonDecoder<T> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<T> Decoder for JsonDecoder<T>
 where
     T: DeserializeOwned,
 {
     type In = T;
 
-    fn encode(&self, data: Option<&[u8]>) -> Self::In {
+    fn decode(&self, data: Option<&[u8]>) -> Self::In {
         serde_json::from_slice(data.expect("empty message")).unwrap()
     }
 }
 
-pub struct JsonDecoder {}
-impl JsonDecoder {
+pub struct JsonEncoder {}
+impl JsonEncoder {
     pub fn new() -> Self {
         Self {}
     }
 }
-impl Decoder for JsonDecoder {
-    fn decode<T>(&self, data: &T) -> Vec<u8>
+
+impl Default for JsonEncoder {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+impl Encoder for JsonEncoder {
+    fn encode<T>(&self, data: &T) -> Vec<u8>
     where
         T: Serialize,
     {
         serde_json::to_vec(&data).unwrap()
+    }
+}
+
+
+// Protobuf
+#[derive(Clone)]
+pub struct ProtobufDecoder<T> {
+    _marker: PhantomData<T>,
+}
+
+impl<T> ProtobufDecoder<T> {
+    pub fn new() -> Self {
+        Self {
+            _marker: PhantomData,
+        }
+    }
+}
+
+impl<T> Default for ProtobufDecoder<T> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<T> Decoder for ProtobufDecoder<T>
+where
+    T: prost::Message + Default,
+{
+    type In = T;
+
+    fn decode(&self, data: Option<&[u8]>) -> Self::In {
+        T::decode(data.expect("empty message")).unwrap()
     }
 }
