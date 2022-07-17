@@ -87,3 +87,35 @@ impl Encoder for JsonEncoder {
         serde_json::to_vec(&data).unwrap()
     }
 }
+
+
+// Protobuf
+#[derive(Clone)]
+pub struct ProtobufDecoder<T> {
+    _marker: PhantomData<T>,
+}
+
+impl<T> ProtobufDecoder<T> {
+    pub fn new() -> Self {
+        Self {
+            _marker: PhantomData,
+        }
+    }
+}
+
+impl<T> Default for ProtobufDecoder<T> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<T> Decoder for ProtobufDecoder<T>
+where
+    T: prost::Message + Default,
+{
+    type In = T;
+
+    fn decode(&self, data: Option<&[u8]>) -> Self::In {
+        T::decode(data.expect("empty message")).unwrap()
+    }
+}
