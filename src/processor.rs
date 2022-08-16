@@ -4,9 +4,9 @@ use std::{
     sync::Arc,
 };
 
-use futures::{future::join_all, stream::select_all, StreamExt, try_join};
+use futures::{future::join_all, stream::select_all, StreamExt};
 use rdkafka::{producer::FutureRecord, Message, message::{OwnedHeaders, Headers}};
-use tokio::sync::{Barrier, Mutex};
+use tokio::{sync::{Barrier, Mutex}, select};
 
 use crate::{
     context::Context,
@@ -148,14 +148,12 @@ where
         }
 
         partitions_barrier.wait().await;
-        try_join!(
-            async { 
-                futures::future::try_join_all(tokio_tasks).await.map_err(
-                    |e| format!("Kast processor {} panicked: {:?}", self.state_namespace, e)
-                )
-            },
-            self.helper.start()
-        ).map(|_| ())
+        select!(
+            f =  futures::future::try_join_all(tokio_tasks) => f.map_err(
+                |e| format!("Kast processor {} panicked: {:?}", self.state_namespace, e)
+            ).map(|_| ()),
+            f = self.helper.start() => f
+        )
     }
 
     pub async fn join(&self) -> Result<(), String> {
