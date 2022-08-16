@@ -4,7 +4,7 @@ use std::{
     sync::Arc,
 };
 
-use futures::{future::join_all, stream::select_all, StreamExt};
+use futures::{future::join_all, stream::select_all, StreamExt, try_join};
 use rdkafka::{producer::FutureRecord, Message, message::{OwnedHeaders, Headers}};
 use tokio::sync::{Barrier, Mutex};
 
@@ -72,6 +72,7 @@ where
         let num_partitions = self.helper.ensure_copartitioned().expect("Not copartitioned");
 
         let partitions_barrier = Arc::new(Barrier::new(num_partitions + 1));
+        let mut tokio_tasks = Vec::new();
         for partition in 0..num_partitions as i32 {
             let inputs = self.inputs.clone();               
             let output_topics_set = output_topics_set.clone();
@@ -80,7 +81,7 @@ where
             let gen = self.state_store_gen.clone();
             let gen2 = self.extra_state_gen.clone();
             let state_namespace = self.state_namespace.clone();
-            tokio::spawn(async move {
+            tokio_tasks.push(tokio::spawn(async move {
                 let state_store = gen();
                 let mut extra_state = gen2();
                 let stream_gens: Vec<_> = inputs.keys().into_iter().map(|topic| {
@@ -143,11 +144,18 @@ where
                         helper_clone.store_offset(&msg_topic, *lock).unwrap();
                     });
                 }
-            });
+            }));
         }
 
         partitions_barrier.wait().await;
-        self.helper.start().await
+        try_join!(
+            async { 
+                futures::future::try_join_all(tokio_tasks).await.map_err(
+                    |e| format!("Kast processor {} panicked: {:?}", self.state_namespace, e)
+                )
+            },
+            self.helper.start()
+        ).map(|_| ())
     }
 
     pub async fn join(&self) -> Result<(), String> {
