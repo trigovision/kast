@@ -16,6 +16,17 @@ use crate::{
     state_store::{StateStore, StateStoreError},
 };
 
+fn format_join_error(e: tokio::task::JoinError) -> String {
+    let p = e.into_panic();
+    match p.downcast::<String>() {
+        Ok(v) => *v,
+        Err(p) => match p.downcast::<&str>() {
+            Ok(v) => v.to_string(),
+            Err(_) => "Unknown panic type".to_string(),
+        },
+    }
+}
+
 pub struct Processor<TState, TExtraState, TStore, F1, F2, H> {
     state_namespace: String,
     helper: H,
@@ -147,18 +158,21 @@ where
             }));
         }
 
+
         partitions_barrier.wait().await;
         let result = select!(
-            f =  futures::future::try_join_all(tokio_tasks.iter_mut()) => f.map_err(
-                |e| format!("Kast processor {} panicked: {:?}", self.state_namespace, e)
-            ).map(|_| ()),
+            f =  futures::future::try_join_all(tokio_tasks.iter_mut()) => { 
+                for t in tokio_tasks {
+                    t.abort();
+                }
+
+                f.map_err(
+                    |e| format!("Kast processor {} panicked: {:?}", self.state_namespace, format_join_error(e))
+                ).map(|_| ()) 
+            },
             f = self.helper.start() => f
         );
 
-        for t in tokio_tasks {
-            t.abort();
-        }
-        
         result
     }
 
