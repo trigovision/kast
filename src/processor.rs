@@ -147,6 +147,8 @@ where
             }));
         }
 
+        return Err("testing".to_string());
+
         partitions_barrier.wait().await;
         select!(
             f =  futures::future::try_join_all(tokio_tasks) => f.map_err(
