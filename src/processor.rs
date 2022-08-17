@@ -112,7 +112,8 @@ where
                     
                     // TODO: Key serializer?
                     let key = std::str::from_utf8(msg.key().unwrap()).unwrap();
-
+                    tracing::debug!("Received kafka message on {}:{}", state_namespace, key);
+                    
                     let state = match state_store.lock().await.get(&state_namespace, key).await {
                         Ok(state) => Some(state),
                         Err(StateStoreError::MissingKey(_)) => None,
@@ -143,6 +144,7 @@ where
 
                     let mut helper_clone = partition_handler.clone();
                     let offset_lock_for_partitioned_topic = topic_partition_offset_locks.entry(msg_topic.clone()).or_insert_with(|| Arc::new(Mutex::new(msg_offset))).clone();  
+                    tracing::debug!("Handled kafka message on {}:{}", state_namespace, key);
                     tokio::spawn(async move {
                         join_all(sends).await;
 
