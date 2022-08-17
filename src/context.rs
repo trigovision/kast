@@ -1,10 +1,15 @@
-use serde::Serialize;
+use std::{sync::Arc, collections::HashMap};
 
-pub struct Context<T = ()> {
+use serde::Serialize;
+use tokio::sync::Mutex;
+
+use crate::state_store::StateStore;
+
+pub struct Context<TStore, T = ()> {
     key: String,
-    origingal_state: Option<T>,
-    new_state: Option<T>,
+    original_state: Option<T>,
     sends: Vec<FutureDeliverableMessage>,
+    state_store: Arc<Mutex<TStore>>,
 }
 
 #[derive(Clone)]
@@ -12,19 +17,20 @@ pub struct FutureDeliverableMessage {
     pub topic: String,
     pub key: String,
     pub payload: Vec<u8>,
+    pub headers: HashMap<String, String>,
 }
 
-impl<T> Context<T>
+impl<TStore, T> Context<TStore, T>
 where
     T: Clone,
+    TStore: StateStore<T>
 {
-    pub fn new(key: &str, state: Option<T>) -> Self {
+    pub fn new(key: &str, state: Option<T>, state_store: Arc<Mutex<TStore>>) -> Self {
         Self {
             key: key.to_string(),
-            origingal_state: state,
-            new_state: None,
+            original_state: state,
             sends: vec![],
-            // deserializers: HashMap::new(),
+            state_store,
         }
     }
 
@@ -32,25 +38,22 @@ where
         &self.key
     }
 
+    pub fn state_store(&self) -> Arc<Mutex<TStore>> {
+        self.state_store.clone()
+    }
+
     pub fn get_state(&self) -> &Option<T> {
-        &self.origingal_state
+        &self.original_state
     }
 
-    pub fn get_new_state(&self) -> &Option<T> {
-        &self.new_state
-    }
-
-    pub fn set_state(&mut self, state: Option<T>) {
-        self.new_state = state
-    }
-
-    pub fn emit<M: Serialize>(&mut self, topic: &str, key: &str, msg: &M) {
+    pub fn emit<M: Serialize>(&mut self, topic: &str, key: &str, msg: &M, headers: HashMap<String, String>) {
         // let output = self.deserializers.get(topic).unwrap();
         let data = serde_json::to_vec(msg).unwrap();
         self.sends.push(FutureDeliverableMessage {
             topic: topic.to_string(),
             key: key.to_string(),
             payload: data,
+            headers,
         });
     }
 
