@@ -148,12 +148,18 @@ where
         }
 
         partitions_barrier.wait().await;
-        select!(
-            f =  futures::future::try_join_all(tokio_tasks) => f.map_err(
+        let result = select!(
+            f =  futures::future::try_join_all(tokio_tasks.iter_mut()) => f.map_err(
                 |e| format!("Kast processor {} panicked: {:?}", self.state_namespace, e)
             ).map(|_| ()),
             f = self.helper.start() => f
-        )
+        );
+
+        for t in tokio_tasks {
+            t.abort();
+        }
+        
+        result
     }
 
     pub async fn join(&self) -> Result<(), String> {
